@@ -69,6 +69,8 @@ Alternative HNSW implementations for ANN search. Lantern uses the USEARCH librar
 | TimescaleDB | Areas 3, 4 | Continuous ingest; incremental stats for recency experiments |
 | ParadeDB | Area 1 | BM25 full-text; replace tsvector for sparse retrieval comparison |
 | Lantern / pg_embedding | Area 1 | ANN index build time + recall benchmarks |
+| FAISS-GPU / cuVS (sidecar) | Area 6 | GPU ANN throughput vs. pgvector CPU HNSW |
+| pgml + CUDA | Area 6 | In-process GPU embedding; buffer pool pressure |
 
 ---
 

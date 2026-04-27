@@ -113,29 +113,60 @@ This thesis is unproven. The research plan below is designed to test it systemat
 
 ---
 
-### Area 5 — Autonomous Research Loop
+### Area 5 — Update Semantics and Live Consistency
 
-**Question:** Can an agent operating over the Nexum graph autonomously generate, prioritize, execute, and refine research hypotheses, closing the loop without human intervention between cycles?
+**Question:** When one store simultaneously serves as knowledge base, training curriculum, and inference target, what are the consistency guarantees required for the "real-time updating model" claim to hold — and what breaks when they are violated?
 
-This area is meta: the research infrastructure itself is a research subject.
+The isomorphism thesis assumes that inserting a block into the graph immediately makes that knowledge available at inference time. This is not trivially true. Embeddings must be computed, HNSW indexes must be updated, link classifiers must run, and any cached inference state must be invalidated. The question is how much of this must be synchronous before the system can claim real-time behavior, and what the practical latency floor is.
 
 **Sub-questions:**
-- What hypothesis representation allows automated falsifiability checking (i.e., a hypothesis that an agent can run an experiment against and get a binary pass/fail)?
-- What search strategies over the hypothesis space are most sample-efficient? (exhaustive enumeration, Bayesian optimization over hypothesis parameters, tree search with UCB)
-- Can the same block graph used for document storage serve as the hypothesis and result store, making research itself an instance of the Nexum model?
-- What is the minimum human-in-the-loop frequency to prevent hypothesis drift (the agent optimizing a proxy metric rather than the true research question)?
+- What is the end-to-end latency from block insertion to that block being retrievable in an inference call — broken down by pipeline stage (embed, index, link, cache invalidation)?
+- Is partial visibility safe? If a block is embedded and indexed but its AI links haven't been classified yet, does serving it degrade inference quality or produce inconsistent results?
+- How does update contention behave under high-ingest conditions? If 10K blocks are inserted simultaneously (e.g., a new document version), does HNSW index build time create a retrieval dead zone?
+- Can the versioning model (shared block UUIDs across document versions) be exploited to make updates atomic at the version level — presenting a consistent snapshot to inference clients while the new version is being indexed?
+- What is the minimum embedding refresh granularity? If a block's content changes slightly (typo fix, metadata update), does its embedding drift enough to matter for retrieval, and can drift be detected cheaply without re-embedding the full corpus?
 
 **Hypotheses to test:**
-- H5.1: Representing hypotheses as structured records (claim, operationalization, null hypothesis, experiment spec, result) in the block graph allows an agent to discover contradictions between hypotheses using the same `contradicts` link type used for document blocks.
-- H5.2: A UCB-based hypothesis selection policy, treating each untested hypothesis as a bandit arm with estimated variance from prior related results, outperforms random hypothesis selection in terms of information gain per experiment.
-- H5.3: Without human review every N cycles, an autonomous research agent will degenerate into optimizing a measurable proxy (e.g., raw retrieval recall) at the expense of the true research objective (end-task accuracy) within 10–20 cycles.
-- H5.4: The graph's versioning model (block dedup across document versions) is directly applicable to hypothesis versioning — refined hypotheses can be modeled as new `document_versions` with `parent_block_id` links to the hypotheses they supersede.
+- H5.1: End-to-end insertion-to-retrieval latency is dominated by the HNSW index update step (not embedding or link classification), and can be reduced below 500ms for single-block inserts by deferring index consolidation to a background process.
+- H5.2: Serving partially-linked blocks (embedded + indexed but AI links not yet classified) degrades inference quality by less than 5% on reasoning tasks — meaning the embedding alone carries most of the retrieval signal, and link classification is a quality enhancement rather than a correctness requirement.
+- H5.3: Version-level atomicity (exposing a new document version to inference clients only after all its blocks are fully indexed and linked) eliminates partial-visibility artifacts at the cost of a latency window proportional to document size — and that window is acceptable (< 60 seconds) for documents up to 500 pages.
+- H5.4: Embedding drift after minor content edits (< 5% token change) is below the retrieval discrimination threshold for 95% of blocks — meaning selective re-embedding triggered by content hash change is sufficient, and full corpus re-embedding is never required for incremental updates.
+- H5.5: Under high-ingest load (10K blocks/minute), a write-optimized insertion path (defer HNSW index build, serve new blocks via sequential scan until index catches up) outperforms a synchronous index-on-insert path in end-to-end query recall, because the sequential scan fallback for un-indexed blocks is cheaper than the index build latency stall.
 
 **Experiments:**
-- Implement a hypothesis store in the Nexum block graph: hypotheses as blocks, experimental results as linked blocks, refinements as new versions with `parent_block_id`.
-- Run 3 autonomous cycles on Area 1 benchmarks. Measure: hypotheses generated, experiments run, hypotheses falsified, new hypotheses spawned from results.
-- Compare UCB vs. random hypothesis selection over 20 cycles on a known benchmark where ground truth is available.
-- Inject a proxy-optimization trap (a measurable metric that is easy to improve but uncorrelated with end-task performance). Observe how many cycles before a human reviewer would catch the drift.
+- Insertion latency breakdown: instrument the ingestion pipeline to record time at each stage (parse, embed, index insert, link classify, cache invalidate). Measure P50/P99 for single-block and batch (1K block) inserts.
+- Partial-visibility eval: build a 100-question eval set. Answer each question at three pipeline stages: (a) after embedding only, (b) after structural links, (c) after AI links. Measure accuracy delta across stages.
+- Version atomicity test: ingest a 500-page document. Measure the wall-clock window between first block insert and full version availability. Evaluate inference quality at 25%, 50%, 75%, 100% indexing completion.
+- Embedding drift detection: take 10K blocks. Apply random minor edits (1–10% token substitution). Re-embed and measure cosine distance to original. Identify the token-change threshold at which retrieval rank shifts by more than 3 positions.
+- High-ingest contention: simulate 10K blocks/minute ingest against a live query workload. Compare synchronous index-on-insert vs. deferred index consolidation on query recall and ingest throughput.
+
+---
+
+### Area 6 — GPU Acceleration for PostgreSQL Extensions
+
+**Question:** Can GPU-accelerated operations inside PostgreSQL close the efficiency gap between graph-resident inference and static model inference — and which pipeline stages benefit most?
+
+The order-of-magnitude latency penalty in the inference substrate thesis comes from three places: ANN retrieval (HNSW graph walk on CPU), embedding computation (either network round-trip or CPU inference), and aggregation (weighted sum or attention over retrieved block vectors). All three are parallelizable. GPUs are already the standard compute substrate for embedding models and attention. The question is whether bringing that compute inside — or immediately adjacent to — the PostgreSQL process is architecturally viable and worth the operational complexity.
+
+**Sub-questions:**
+- Which operation in the inference step function (ANN retrieval, embedding, aggregation/attention) has the highest GPU speedup potential, and what is the crossover corpus size at which GPU wins?
+- Can pgml's in-process model execution be extended to GPU-backed inference (via CUDA or ROCm), and what is the memory pressure implication for the Postgres buffer pool?
+- Is a GPU-colocated sidecar (a small inference server on the same host, accessed via Unix socket) a better architecture than true in-process GPU execution for latency and operational simplicity?
+- For the HNSW index specifically: do GPU-accelerated ANN libraries (FAISS-GPU, cuVS/RAFT) outperform pgvector's CPU HNSW at the corpus scales relevant to Nexum (1M–100M blocks), and can their indexes be kept in sync with the Postgres block table?
+- Does batching inference requests (accumulating N queries before a GPU kernel launch) improve throughput enough to offset the added latency, and what is the optimal batch size per corpus scale?
+
+**Hypotheses to test:**
+- H6.1: GPU-accelerated ANN search (FAISS-GPU or cuVS) outperforms pgvector CPU HNSW by > 10x on throughput at 10M+ blocks, at equivalent recall@10, making it the dominant optimization lever for the inference substrate at scale.
+- H6.2: In-process GPU embedding (pgml + CUDA) reduces single-block embedding latency below 5ms, eliminating the embedding stage as a bottleneck and making HNSW index update the new binding constraint.
+- H6.3: A GPU-colocated sidecar accessed via Unix socket achieves within 20% of true in-process GPU latency, with significantly lower operational complexity — making it the preferred architecture over modifying the Postgres process directly.
+- H6.4: Batched GPU inference (batch size 32–128) improves throughput by > 5x vs. single-query GPU inference, and the added queuing latency (< 50ms at batch size 32) is acceptable for non-interactive workloads (curriculum generation, background link classification).
+
+**Experiments:**
+- ANN benchmark: load 10M blocks into pgvector (CPU HNSW), FAISS-GPU (flat + IVF), and cuVS/RAFT HNSW. Measure throughput (queries/sec) and recall@10 at equivalent index build time. Run on same GPU hardware.
+- Embedding latency breakdown: compare (a) OpenAI API round-trip, (b) CPU-local model via pgml, (c) GPU-local model via pgml + CUDA. Measure P50/P99 for single and batched (32, 128) requests.
+- Sidecar vs. in-process: implement both architectures. Measure latency for the full inference step function (ANN + embed + aggregate). Compare on a 1000-query workload.
+- Batch size sweep: for GPU embedding and GPU ANN, sweep batch sizes 1, 8, 32, 128, 512. Measure throughput and P99 latency. Identify the knee of the curve.
+- Buffer pool pressure: measure Postgres shared_buffers hit rate before and after loading a GPU-backed embedding model into the process. Quantify eviction pressure on the block table data pages.
 
 ---
 
@@ -152,16 +183,19 @@ The areas are not fully independent. Suggested sequencing:
 ```
 Area 1 (Storage Fitness)
     │
-    ├── Area 2 (Training Curriculum)   ← depends on Area 1 benchmarks establishing baselines
+    ├── Area 2 (Training Curriculum)      ← depends on Area 1 baselines
     │
-    ├── Area 3 (Inference Substrate)   ← depends on Area 1 storage architecture decisions
+    ├── Area 3 (Inference Substrate)      ← depends on Area 1 storage decisions
     │       │
-    │       └── Area 4 (Isomorphism)   ← depends on Area 2 + Area 3 results
+    │       └── Area 4 (Isomorphism)      ← depends on Area 2 + Area 3 results
     │
-    └── Area 5 (Autonomous Loop)       ← can start in parallel; feeds all other areas over time
+    ├── Area 5 (Update Semantics)         ← depends on Area 1 + Area 3; governs
+    │                                        the live-consistency guarantees that
+    │                                        Areas 3 and 4 assume
+    │
+    └── Area 6 (GPU Acceleration)         ← depends on Area 5 latency baselines;
+                                             optimizes the bottlenecks Area 5 identifies
 ```
-
-Area 5 is the flywheel. Once the hypothesis store and agent loop are operational, they can drive experimentation in Areas 1–4 without manual experiment scheduling.
 
 ---
 
@@ -177,8 +211,10 @@ Area 5 is the flywheel. Once the hypothesis store and agent loop are operational
 | Inference tokens/sec | Efficiency | Area 3 |
 | Knowledge recency delta (hours) | Correctness | Areas 3, 4 |
 | Attribution accuracy (%) | Auditability | Area 4 |
-| Hypotheses falsified per cycle | Research velocity | Area 5 |
-| Proxy drift detection cycle | Safety | Area 5 |
+| Insertion-to-retrieval latency (ms) | Correctness | Areas 5, 6 |
+| Embedding drift (cosine delta) | Correctness | Area 5 |
+| GPU ANN throughput (queries/sec) | Efficiency | Area 6 |
+| Batch inference throughput (tokens/sec) | Efficiency | Area 6 |
 
 ---
 
@@ -203,6 +239,6 @@ For autonomous research agents operating over this plan:
 3. **Execute** the experiment. Write results as a new block linked to the hypothesis block with `rel_type: supports | contradicts | inconclusive`.
 4. **Spawn** child hypotheses: for each supported hypothesis, generate a more specific version; for each contradicted hypothesis, generate an alternative explanation.
 5. **Prune** hypotheses superseded by results. Mark with a `confirmed: false` link from the child hypothesis block back to the parent.
-6. **Escalate** to a human reviewer after every 5 cycles, or whenever a hypothesis in Area 5 (proxy drift) is triggered.
+6. **Escalate** to a human reviewer after every 5 cycles, or whenever a result contradicts a previously supported hypothesis.
 
 Every hypothesis, experiment spec, result, and child hypothesis is stored as a block in the Nexum graph, making the research process itself a first-class corpus.

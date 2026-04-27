@@ -179,7 +179,7 @@ Append a cycle entry to `docs/research/log.md`. Fill every field.
 Escalate (stop the loop and report to the user) if any of the following:
 1. This is cycle 5, 10, 15, ... (every 5 cycles)
 2. Two consecutive cycles produced `inconclusive` results on the same research area — possible proxy drift
-3. A hypothesis in Area 5 (autonomous loop safety) is triggered as supported — meaning the agent may be optimizing a proxy
+3. A result in Area 5 contradicts a previously supported hypothesis about update semantics — requires human review of the consistency model
 4. An experiment requires destructive database operations or external API calls exceeding $5 estimated cost
 5. A result contradicts a previously `supported` hypothesis — requires human adjudication
 
@@ -195,7 +195,8 @@ Work areas in this order unless a prior result redirects you:
 2. **Area 2** — once a corpus baseline exists, curriculum experiments can begin
 3. **Area 3** — inference substrate experiments require Area 1 storage decisions
 4. **Area 4** — isomorphism evaluation requires Area 2 + Area 3 results
-5. **Area 5** — the autonomous loop meta-area; work it in parallel by applying UCB and proxy-drift checks to your own operation each cycle
+5. **Area 5** — update semantics and live consistency; governs the correctness guarantees that Areas 3 and 4 assume
+6. **Area 6** — GPU acceleration for PG extensions; work after Area 5 establishes the latency baseline that GPU work would improve
 
 If you reach a cycle where no hypothesis in the priority area is testable (missing infrastructure, blocked on prior result), drop down to the next area rather than stalling.
 
