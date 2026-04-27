@@ -144,9 +144,11 @@ The isomorphism thesis assumes that inserting a block into the graph immediately
 
 ### Area 6 — GPU Acceleration for PostgreSQL Extensions
 
-**Question:** Can GPU-accelerated operations inside PostgreSQL close the efficiency gap between graph-resident inference and static model inference — and which pipeline stages benefit most?
+**Question:** Can GPU-accelerated operations inside PostgreSQL close the efficiency gap between graph-resident inference and static model inference — and which pipeline stages benefit most, including when the corpus is too large to fit in VRAM?
 
 The order-of-magnitude latency penalty in the inference substrate thesis comes from three places: ANN retrieval (HNSW graph walk on CPU), embedding computation (either network round-trip or CPU inference), and aggregation (weighted sum or attention over retrieved block vectors). All three are parallelizable. GPUs are already the standard compute substrate for embedding models and attention. The question is whether bringing that compute inside — or immediately adjacent to — the PostgreSQL process is architecturally viable and worth the operational complexity.
+
+A secondary and under-examined dimension is **GPU paging**: for extremely large Nexum deployments (100M+ blocks), the embedding matrix alone (100M × 1536 × 4 bytes ≈ 600 GB float32, or ~75 GB at int8) cannot fit in a single GPU's VRAM. This requires a tiered GPU memory strategy analogous to the CPU hot/cold cache in H3.2, but operating across VRAM → system RAM → NVMe with different latency characteristics and CUDA-specific constraints (pinned memory, UVM, peer access).
 
 **Sub-questions:**
 - Which operation in the inference step function (ANN retrieval, embedding, aggregation/attention) has the highest GPU speedup potential, and what is the crossover corpus size at which GPU wins?
@@ -154,12 +156,16 @@ The order-of-magnitude latency penalty in the inference substrate thesis comes f
 - Is a GPU-colocated sidecar (a small inference server on the same host, accessed via Unix socket) a better architecture than true in-process GPU execution for latency and operational simplicity?
 - For the HNSW index specifically: do GPU-accelerated ANN libraries (FAISS-GPU, cuVS/RAFT) outperform pgvector's CPU HNSW at the corpus scales relevant to Nexum (1M–100M blocks), and can their indexes be kept in sync with the Postgres block table?
 - Does batching inference requests (accumulating N queries before a GPU kernel launch) improve throughput enough to offset the added latency, and what is the optimal batch size per corpus scale?
+- **GPU paging:** When the embedding corpus exceeds VRAM, what is the optimal tiering strategy across VRAM / pinned system RAM / NVMe? Can CUDA Unified Virtual Memory (UVM) or GPUDirect Storage manage this transparently, or does explicit shard management (Zipfian hot-shard promotion into VRAM) outperform automatic paging?
+- Can the Nexum block graph's access patterns (high-degree blocks are disproportionately retrieved) be exploited to pre-load the top-N% of blocks by in-degree into VRAM, achieving near-full-fit performance even when the full corpus is 10x VRAM capacity?
 
 **Hypotheses to test:**
 - H6.1: GPU-accelerated ANN search (FAISS-GPU or cuVS) outperforms pgvector CPU HNSW by > 10x on throughput at 10M+ blocks, at equivalent recall@10, making it the dominant optimization lever for the inference substrate at scale.
 - H6.2: In-process GPU embedding (pgml + CUDA) reduces single-block embedding latency below 5ms, eliminating the embedding stage as a bottleneck and making HNSW index update the new binding constraint.
 - H6.3: A GPU-colocated sidecar accessed via Unix socket achieves within 20% of true in-process GPU latency, with significantly lower operational complexity — making it the preferred architecture over modifying the Postgres process directly.
 - H6.4: Batched GPU inference (batch size 32–128) improves throughput by > 5x vs. single-query GPU inference, and the added queuing latency (< 50ms at batch size 32) is acceptable for non-interactive workloads (curriculum generation, background link classification).
+- H6.5: For a corpus that is 10x VRAM capacity, explicit hot-shard management (top 10% of blocks by in-degree pinned in VRAM) achieves > 80% of full-fit GPU throughput, whereas CUDA UVM automatic paging achieves < 30% due to page-fault overhead on the irregular access patterns of ANN traversal.
+- H6.6: The Nexum block graph's access distribution is sufficiently Zipfian (measured empirically across real institution corpora) that a 10% VRAM footprint covers > 70% of inference retrievals — making the hot-shard strategy practical without per-institution tuning.
 
 **Experiments:**
 - ANN benchmark: load 10M blocks into pgvector (CPU HNSW), FAISS-GPU (flat + IVF), and cuVS/RAFT HNSW. Measure throughput (queries/sec) and recall@10 at equivalent index build time. Run on same GPU hardware.
@@ -167,6 +173,8 @@ The order-of-magnitude latency penalty in the inference substrate thesis comes f
 - Sidecar vs. in-process: implement both architectures. Measure latency for the full inference step function (ANN + embed + aggregate). Compare on a 1000-query workload.
 - Batch size sweep: for GPU embedding and GPU ANN, sweep batch sizes 1, 8, 32, 128, 512. Measure throughput and P99 latency. Identify the knee of the curve.
 - Buffer pool pressure: measure Postgres shared_buffers hit rate before and after loading a GPU-backed embedding model into the process. Quantify eviction pressure on the block table data pages.
+- GPU paging benchmark: synthesize a corpus at 2x, 5x, 10x VRAM capacity. Compare three strategies: (a) CUDA UVM automatic paging, (b) explicit hot-shard pinning (top-N% by in-degree), (c) CPU HNSW fallback for cold shards + GPU for hot. Measure throughput and recall@10 across strategies.
+- Access distribution measurement: instrument a live Nexum query workload across 3 institution-type corpora (legal, medical, mixed). Plot block retrieval frequency rank-order distribution. Fit a Zipf curve. Measure what fraction of retrievals are served by the top 5%, 10%, 20% of blocks.
 
 ---
 
