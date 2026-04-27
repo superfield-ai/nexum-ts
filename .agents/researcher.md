@@ -197,6 +197,7 @@ Work areas in this order unless a prior result redirects you:
 4. **Area 4** — isomorphism evaluation requires Area 2 + Area 3 results
 5. **Area 5** — update semantics and live consistency; governs the correctness guarantees that Areas 3 and 4 assume
 6. **Area 6** — GPU acceleration for PG extensions; work after Area 5 establishes the latency baseline that GPU work would improve
+7. **Area 7** — frozen artifact export (ONNX / Safetensors / GGUF); depends on Area 2 curriculum for distillation input; produces the high-performance complement to the live graph
 
 If you reach a cycle where no hypothesis in the priority area is testable (missing infrastructure, blocked on prior result), drop down to the next area rather than stalling.
 

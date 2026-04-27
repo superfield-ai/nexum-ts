@@ -170,6 +170,37 @@ The order-of-magnitude latency penalty in the inference substrate thesis comes f
 
 ---
 
+### Area 7 — Frozen Artifact Export (ONNX / Safetensors / GGUF from the Graph)
+
+**Question:** Can the Nexum graph be compiled into a standard optimized inference artifact — ONNX, Safetensors, or GGUF — that captures the knowledge state of the store at a point in time, enabling high-performance static inference where the latency penalty of graph-resident inference is unacceptable?
+
+This closes the loop on the core thesis. The isomorphic store is the live, authoritative source of knowledge. But some deployments — mobile, edge, latency-critical APIs, air-gapped environments — cannot tolerate the 20–50x latency penalty of graph-resident inference even with GPU acceleration (Area 6). The answer is not to abandon isomorphism, but to treat the graph as a compiler input: periodically "freeze" its current state into a standard weights artifact, deploy that artifact for high-performance inference, and accept that the frozen artifact is a snapshot — current as of its export timestamp — while the live graph continues to update.
+
+The research question is whether a graph-derived frozen artifact is competitive with a conventionally trained model of equivalent parameter count, and what the right export architecture looks like.
+
+**Sub-questions:**
+- What graph-to-weights compilation strategies exist? Options include: distillation (train a small student model on graph-derived curriculum from Area 2), direct embedding matrix export (pack block embeddings into a retrieval-optimized weight format), and attention weight synthesis (construct transformer attention matrices from link weights and embeddings).
+- What is the fidelity loss from freezing — how quickly does a frozen artifact become stale relative to the live graph, and what is the right re-export cadence per institution type?
+- Can the typed link structure (rel_type, weight, layer) be encoded into the frozen artifact's weights such that the static model inherits relationship-aware behavior, rather than treating all knowledge as flat?
+- Is GGUF, Safetensors, or ONNX the right target format for a graph-distilled model? They have different trade-offs in quantization support, operator coverage, and ecosystem tooling.
+- What is the minimum corpus size / graph density at which a frozen graph-derived model outperforms a conventionally trained model of the same parameter count on domain-specific tasks?
+
+**Hypotheses to test:**
+- H7.1: A student model distilled from a graph-derived curriculum (Area 2) and exported to GGUF achieves within 10% task accuracy of the graph-resident inference client on the same benchmark, at 100x lower inference latency — making frozen export the preferred deployment path for latency-sensitive workloads.
+- H7.2: Encoding link weights and rel_types as soft attention biases during distillation produces a frozen model that outperforms a distilled model trained on flat corpus by > 8% on multi-hop reasoning tasks — demonstrating that the graph structure survives compilation into weights.
+- H7.3: The staleness penalty of a frozen artifact grows super-linearly with corpus update rate: at update rates below 100 blocks/day the frozen model degrades negligibly (< 2% accuracy drop per week), but above 1000 blocks/day staleness becomes the dominant error source within 48 hours.
+- H7.4: A GGUF export pipeline from the Nexum graph (graph → curriculum → distillation → quantization → GGUF) can produce a deployment-ready artifact in under 4 hours for a 10M-block corpus on a single A100, making daily re-export operationally feasible.
+- H7.5: Safetensors is the superior intermediate format (over ONNX) for graph-distilled models because its zero-copy mmap semantics allow partial loading of the embedding matrix — mirroring the hot/cold block cache from Area 6 — while ONNX's operator graph representation adds unnecessary overhead for retrieval-heavy architectures.
+
+**Experiments:**
+- Distillation pipeline: implement graph → curriculum (Area 2 BFS walk) → student model fine-tune → GGUF export. Evaluate on 3 domain benchmarks vs. graph-resident client and vs. conventionally trained baseline.
+- Link-encoded distillation: compare two distillation runs — (a) flat sequence training, (b) attention-bias-injected training using link weights. Measure multi-hop reasoning accuracy delta.
+- Staleness curve: export a frozen artifact daily for 2 weeks while continuously ingesting updates into the live graph. Measure accuracy on a stable held-out eval set each day. Plot accuracy vs. days-since-export at different update rates (10, 100, 1000, 10K blocks/day).
+- Export pipeline timing: instrument the full export pipeline. Measure wall-clock time per stage (curriculum generation, distillation training, quantization, GGUF pack) at corpus sizes 1M, 5M, 10M blocks.
+- Format comparison: export the same distilled model to ONNX, Safetensors, and GGUF. Measure cold-load time, warm inference latency, quantization fidelity at int8 and int4, and ecosystem tooling compatibility (llama.cpp, HuggingFace transformers, ONNX Runtime).
+
+---
+
 ## Related Research Documents
 
 - [`research/pg-extensions.md`](research/pg-extensions.md) — Extended PostgreSQL options on the table (AGE, pgml, TimescaleDB, ParadeDB, Lantern) and the case for building a purpose-built `nexum` extension (`pgrx`-based) with a composite graph-vector index, curriculum walker, inference step function, and provenance aggregate.
@@ -193,8 +224,13 @@ Area 1 (Storage Fitness)
     │                                        the live-consistency guarantees that
     │                                        Areas 3 and 4 assume
     │
-    └── Area 6 (GPU Acceleration)         ← depends on Area 5 latency baselines;
-                                             optimizes the bottlenecks Area 5 identifies
+    ├── Area 6 (GPU Acceleration)         ← depends on Area 5 latency baselines;
+    │                                        optimizes the bottlenecks Area 5 identifies
+    │
+    └── Area 7 (Frozen Artifact Export)   ← depends on Area 2 (curriculum) for
+                                             distillation input; produces the
+                                             high-performance complement to the
+                                             live graph-resident client
 ```
 
 ---
@@ -215,6 +251,9 @@ Area 1 (Storage Fitness)
 | Embedding drift (cosine delta) | Correctness | Area 5 |
 | GPU ANN throughput (queries/sec) | Efficiency | Area 6 |
 | Batch inference throughput (tokens/sec) | Efficiency | Area 6 |
+| Frozen artifact task accuracy vs. live graph (%) | Quality | Area 7 |
+| Staleness accuracy decay (% / day) | Correctness | Area 7 |
+| Export pipeline wall-clock time (hours) | Efficiency | Area 7 |
 
 ---
 
