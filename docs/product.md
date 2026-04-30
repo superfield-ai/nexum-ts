@@ -27,6 +27,20 @@ The underlying use cases span any knowledge-intensive domain: legal, finance, he
 
 ---
 
+## Principal Model
+
+Nexum has one principal type: **entities**. Both human users and agents are entities. They share the same identity model, the same scope system, and the same access control checks. The only difference is how they authenticate and what scopes they are granted.
+
+**Human principals** authenticate via session token (cookie or Bearer JWT). They are created through the registration flow and interact via the API or any application built on top of it.
+
+**Agent principals** authenticate via API key (Bearer token). They are registered through the same entity creation endpoint as users, with `type: agent`. Their properties include a name, description, a list of granted scopes, and the corpus IDs they are permitted to read from and write to. There is no separate agent management API — agents are entities, created and managed with the same CRUD operations as any other principal.
+
+Scopes are additive string grants stored on the entity. Example scopes: `corpus:read`, `corpus:write`, `blocks:synthesize`, `links:create`, `external:ingest`. A human administrator grants scopes to an agent at registration time; an agent cannot grant itself new scopes.
+
+Agents interact with Nexum exclusively through the API. They do not have a UI. They poll for new material on a schedule; Nexum does not push events to agents.
+
+---
+
 ## Core API Capabilities
 
 ### 1. Document Ingestion
@@ -79,19 +93,25 @@ Three query modes, all returning block IDs with relevance scores and link contex
 
 Results across all modes include provenance: who created each link, when, and with what confidence.
 
-### 6. Synthesis API
+### 6. Polling Cursor
+
+Agents discover new ingest by polling `GET /blocks?corpus_id=X&since=<ISO_TIMESTAMP>`. The response returns all blocks created or updated after the cursor, along with their link state. Agents advance their cursor on each successful poll and repeat on their own schedule.
+
+This is the primary mechanism for event-driven synthesis. Nexum does not push events to agents; agents pull.
+
+### 7. Synthesis API
 
 Write synthesized blocks back into the graph. A synthesized block is a first-class graph participant — linkable, versioned, and traceable to the source blocks that produced it.
 
 The API accepts:
 - The synthesized block content
-- A pointer to the agent that produced it
+- The entity ID of the agent that produced it (must match the authenticated principal)
 - A list of source block IDs the synthesis drew from
 - An optional confidence score
 
-Nexum automatically creates `sourced-from` links between the synthesized block and its sources. If a source block is later corrected or retracted, all synthesized blocks derived from it are flagged via a webhook.
+Nexum automatically creates `sourced-from` links between the synthesized block and its sources. If a source block is later corrected or retracted, the derived synthesized blocks are marked stale and returned with a `stale: true` flag on subsequent reads — agents discover staleness on their next poll cycle.
 
-### 7. Provenance on Every Block and Link
+### 8. Provenance on Every Block and Link
 
 Every block and link carries full provenance: origin type (`source` / `synthesized` / `external`), creator (parser, embedding model, AI agent, human, caller-specified agent ID), timestamp, confidence, and — for external blocks — source metadata. Provenance is queryable and filterable.
 
@@ -113,37 +133,43 @@ Every block and link carries full provenance: origin type (`source` / `synthesiz
 
 ## Synthesis Agents — Reference Patterns
 
-The following patterns illustrate how customers deploy agents on top of the Nexum API. They are not built-in features — customers implement them using the ingest, query, and synthesis endpoints. They are documented here as reference architectures for common use cases.
+The following patterns are reference agent definitions — documented templates showing how to register an agent entity, configure its scopes, and implement its polling loop. They are not built-in features. Customers register these agents in their own Nexum deployment, configure them with the appropriate corpus access, and run the poll loop wherever they run their other services.
+
+Each agent is an entity in the system: registered via `POST /entities` with `type: agent`, granted scopes by a human administrator, and authenticated on every API call with its API key.
 
 ### Handbook Agent
 
-An agent that maintains a living company handbook: policies, procedures, and operating norms, each traceable to the internal decisions and events that produced them.
+**Registration:** `type: agent`, scopes: `corpus:read` (internal corpus), `corpus:write` (handbook corpus), `blocks:synthesize`, `links:create`.
 
-The agent ingests internal source material — decision logs, incident reports, postmortems, leadership communications — and uses the synthesis API to write structured handbook entries. Each entry links back to the source blocks it was derived from.
+**Poll loop:** On each cycle, calls `GET /blocks?corpus_id=<internal>&since=<cursor>` to find new source material — decision logs, incident reports, postmortems, leadership communications. For each new block, queries the graph for related handbook entries via semantic search and graph traversal. If a new block contradicts an existing handbook entry (a `contradicts` link appears), the agent synthesizes a revised entry and writes it back via the synthesis API. The prior entry becomes its predecessor; nothing is deleted. Advances the cursor on success.
 
-When a new source document contradicts an existing handbook entry, the Nexum graph surfaces a `contradicts` link between the new block and the existing synthesized block. The agent reads this signal and drafts a revision. The prior entry becomes the predecessor version; nothing is deleted.
-
-The approval step — who reviews the draft, in what tool, on what schedule — is the customer's responsibility. Nexum surfaces the contradiction and the proposed revision via its API; the workflow around that is built by the customer.
+The approval step — who reviews the draft, in what tool, on what schedule — is built by the customer. The agent writes a draft synthesized block with a `pending_review: true` flag in its properties; the customer's application reads that flag and routes it to the appropriate reviewer.
 
 ### Customer Profile Agent
 
-An agent that synthesizes a persistent, structured profile for each customer from every document and interaction the organization holds.
+**Registration:** `type: agent`, scopes: `corpus:read` (all source corpora), `corpus:write` (profiles corpus), `blocks:synthesize`, `links:create`.
 
-Source material spans systems: contracts, support tickets, sales notes, call transcripts, invoices, CRM exports. The agent ingests all of it and writes synthesized profile blocks for each customer — what they were promised, what they've experienced, where friction exists.
+**Poll loop:** On each cycle, polls for new blocks across all source corpora — contracts, support tickets, CRM exports, call transcripts. Groups new blocks by customer entity. For each customer with new activity, re-synthesizes the affected sections of their profile and writes updated blocks. Creates `sourced-from` links to every source block used.
 
-When a contract block says "48-hour SLA" and a support-ticket block says "customer was told 24 hours," Nexum creates a `contradicts` link. The profile agent surfaces this in its output; the customer decides how to resolve it.
-
-Customer profile documents are graph-connected to the source blocks they draw from, to relevant handbook entries (which policies govern this relationship), and to other profiles where overlap exists.
+When a contract block and a support-ticket block carry incompatible claims, the existing `contradicts` link in the graph surfaces automatically in the next synthesis pass. The profile agent includes the conflict in its output with both sides of the contradiction visible; resolution is the customer's workflow.
 
 ### Strategic Planning Agent
 
-An agent that maintains forward-looking planning documents grounded in both internal forecasts and external signals.
+**Registration:** `type: agent`, scopes: `corpus:read` (internal + external corpora), `external:ingest`, `corpus:write` (strategy corpus), `blocks:synthesize`, `links:create`.
 
-Internal source material: financial projections, OKRs, board decks, roadmaps. External source material: trade press, competitor announcements, regulatory notices, macroeconomic signals. Both are ingested via the same endpoint; external documents carry credibility weights assigned by the agent at ingest time.
+**Poll loop:** Two input streams. Internal: polls for new blocks from financial projections, OKRs, board decks, roadmaps. External: fetches configured sources (trade press, competitor sites, regulatory feeds), ingests new documents via `POST /ingest` with `origin: external` and source metadata, then polls for the resulting blocks. Synthesizes structured strategy documents — competitive maps, risk registers, scenario plans — and writes them back. Each synthesized claim links to its source blocks; external blocks propagate their source metadata into those links.
 
-The agent synthesizes structured strategy documents — competitive maps, risk registers, scenario plans — and writes them back via the synthesis API. Each claim links to the source blocks that support it. When an external signal contradicts an internal assumption, the `contradicts` link is queryable.
+This pattern illustrates the general external-source capability. Any agent with `external:ingest` scope can bring outside material into the graph. The strategic planning agent is one application; the same mechanism works for any workflow that needs to reason across internal and external material.
 
-This pattern illustrates the general external-source capability: any agent can ingest external documents with caller-assigned metadata and use the resulting blocks in synthesis. The strategy agent is one application of that; the same mechanism applies to any workflow that needs to reason across internal and external material.
+### Credibility Agent (Reference Template)
+
+**Registration:** `type: agent`, scopes: `corpus:read` (external corpus), `blocks:synthesize`.
+
+**Purpose:** Evaluates external source blocks and writes credibility assessments back as synthesized metadata blocks. Other agents query these assessments when reasoning about external material.
+
+**Poll loop:** On each cycle, polls for new `origin: external` blocks. For each new block, evaluates the source against configurable criteria — publication history, domain reputation, cross-referenceability with other sources in the corpus, freshness. Writes a synthesized credibility block linked to the source block with a numeric score and a short rationale. Agents that synthesize from external material query for the linked credibility block before including the source in their output.
+
+The credibility evaluation logic is entirely within the agent — Nexum has no built-in taxonomy. Different deployments implement different credibility models appropriate to their domain. Nexum ships this template as a starting point; the evaluation prompt and scoring rubric are customer-defined.
 
 ---
 
@@ -165,12 +191,12 @@ Resolved decisions are struck through. Remaining questions affect API design or 
 
 ~~**Who owns the handbook agent's approval workflow?**~~ Resolved: the customer. Nexum surfaces contradictions and synthesized revisions via the API; the approval UX is built by the customer in whatever tool they use.
 
-~~**Agent conflict resolution policy.**~~ Resolved: Nexum surfaces `contradicts` links and flags stale synthesized blocks via webhooks. Policy for what to do with a conflict — which agent has authority, whether synthesis is blocked — is implemented by the customer on top of the API.
+~~**Agent conflict resolution policy.**~~ Resolved: Nexum surfaces `contradicts` links and marks stale synthesized blocks; policy is implemented by the customer on top of the API.
 
-~~**Corpus permissions model.**~~ Resolved: Nexum provides corpus-scoped API keys and block-level access metadata. Customers implement their own access control policies using these primitives; Nexum does not enforce document-level permissions internally.
+~~**Corpus permissions model.**~~ Resolved: agents are entities with explicit scope grants on registered corpora. Nexum enforces scope at the API boundary; customers control which scopes each agent receives.
 
-**Synthesis cost and trigger model.**
-Agents can trigger synthesis on any schedule or event. The right default — ingest-triggered vs. scheduled batch vs. on-demand — affects both cost and freshness guarantees. The API should expose an ingest webhook that agents can subscribe to, so event-driven synthesis is possible without polling. Decision needed: is the ingest webhook a v1 feature or deferred?
+~~**Synthesis trigger model.**~~ Resolved: agents poll via the `since` cursor endpoint on their own schedule. Nexum does not push events. Polling is the canonical trigger mechanism.
 
-**External source credibility model.**
-Credibility weights on external documents are currently caller-assigned at ingest time. This is flexible but puts the entire burden on the customer. An optional Nexum-managed credibility taxonomy (e.g., peer-reviewed / trade press / company blog / social) with sensible defaults would reduce integration friction. Decision needed: does Nexum ship a default taxonomy, or is credibility always fully caller-defined?
+~~**External source credibility model.**~~ Resolved: Nexum ships a Credibility Agent reference template. Evaluation logic, scoring rubric, and taxonomy are customer-defined within the agent. No built-in taxonomy.
+
+All major product design questions are currently resolved. Open questions will be added here as new decisions arise.
