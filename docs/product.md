@@ -83,6 +83,24 @@ Agents interact with Nexum exclusively through the API. They do not have a UI. T
 
 ---
 
+## Privacy and Need-to-Know Access
+
+Nexum enforces access control at every layer of the graph. Authorization is not only about which corpus a principal can enter — it is about which blocks within that corpus they can see, and whether they can infer the existence of blocks they cannot read.
+
+**Corpus-level access** is the outer boundary. An entity (human or agent) must have `corpus:read` scope on a corpus to receive any block from it. Corpus access is granted explicitly by a human administrator; it is not inherited from organizational membership or role.
+
+**Block-level access** is the inner boundary. Within an authorized corpus, individual blocks or block subtrees can carry additional access restrictions — classification levels, team tags, or explicit principal allowlists. An agent with `corpus:read` does not automatically see all blocks in that corpus; it sees the subset for which it is authorized. This is the need-to-know layer: an agent responsible for synthesizing customer profiles has no business reading internal compensation records, even if both live in the same corpus.
+
+**Links inherit the most restrictive endpoint.** A link between block A and block B is not visible to a principal who cannot see both A and B. The graph does not leak the existence of a relationship through a visible endpoint. A principal traversing from a visible block will not receive edges that point to blocks outside their access boundary — those edges are silently absent from their traversal result.
+
+**Synthesized blocks inherit source access levels.** When an agent synthesizes a block from sources of varying access levels, the synthesized block's access level is set to the most restrictive of its sources, unless the administrator explicitly overrides it. This prevents access escalation through synthesis: a summary of a restricted source block does not become a loophole for reading restricted content.
+
+**The graph does not leak shape.** A principal cannot determine the size or structure of a corpus beyond what they are authorized to see. Block IDs, link counts, and traversal depth are all scoped to the principal's authorized view.
+
+**Agent scopes are purposive, not permissive.** Scopes are granted for a stated purpose; an agent is not granted "read everything in this corpus" as a default. The principle is minimum necessary access: the Handbook Agent gets read access on the internal corpus and write access on the handbook corpus — nothing else. A narrowly scoped agent cannot be co-opted by a malicious prompt to exfiltrate data outside its purpose.
+
+---
+
 ## Core API Capabilities
 
 ### 1. Document Ingestion
@@ -109,21 +127,27 @@ Every document in Nexum is versioned. Submitting a new draft creates a new versi
 
 ### 3. Three Layers of Links
 
-**Structural links** — resolved automatically from citations in the text. A document that references another block by name, number, or explicit citation gets a navigable edge to the target block.
+All links are created by the system — no customer is expected to tag relationships manually. The three layers differ in how the link is detected, and carry different default confidence weights as a result.
 
-**Semantic links** — blocks covering similar territory are linked via embedding similarity. No explicit citation required.
+**Structural links** — resolved automatically from citations in the text. A document that references another block by name, number, or explicit citation gets a navigable edge to the target block. High confidence; the source text is explicit. These are deterministic.
 
-**AI-inferred links** — an LLM reads blocks in context and asserts typed relationships: *supports*, *contradicts*, *elaborates*, *overrides*, *is-exception-to*. These capture logical and argumentative structure beyond surface similarity.
+**Semantic links** — blocks covering similar territory are linked via embedding similarity. No explicit citation required. Confidence is proportional to embedding proximity; the score is queryable. These are probabilistic, not deterministic.
+
+**AI-inferred links** — an LLM reads blocks in context and asserts typed relationships: *supports*, *contradicts*, *elaborates*, *overrides*, *is-exception-to*. These capture logical and argumentative structure beyond surface similarity. Confidence is assigned by the model and recorded on the link. AI-inferred links carry lower default confidence than structural links and should be filtered by confidence when precision is required.
+
+All three link types are first-class graph participants. They are not equivalent — the system exposes their confidence scores and mechanism of origin so agents and consumers can reason about how much to weight any given edge.
 
 ### 4. Relationship Types
 
-Links are typed, not just weighted:
+Links are typed and weighted:
 - **Cites** — explicit reference in text
 - **Contradicts** — logically incompatible claims
 - **Elaborates** — expands on a point
 - **Overrides** — a later provision supersedes an earlier one
 - **Supports** — corroborating evidence or argument
 - **Is-exception-to** — carve-outs and qualifications
+
+Each link carries a `confidence` score (0–1) and a `mechanism` field (`structural`, `semantic`, `ai_inferred`). Query filters can restrict traversal by minimum confidence or mechanism type.
 
 ### 5. Query API
 
@@ -157,20 +181,22 @@ Nexum automatically creates `sourced-from` links between the synthesized block a
 
 ### 8. Synthesis Quorum
 
-High-impact or mission-critical synthesized blocks can require multi-agent consensus before being published to the graph. The pattern draws from aerospace voting systems and blockchain multi-signature schemes: no single agent's output is trusted unilaterally; the block is only committed once a quorum of independent agents has signed off on the same conclusion.
+High-impact or mission-critical synthesized blocks can require multi-agent consensus before being published to the graph. The pattern draws from aerospace voting systems: no single agent's output is trusted unilaterally; the block is only committed once a quorum of independent agents has affirmed it.
 
-**How it works.** A block submitted to the synthesis API can be marked `status: pending_quorum` with a `quorum` configuration specifying the required signatories (by entity ID) and the threshold (e.g., 3-of-5). The block exists in the graph in a `pending` state — readable by quorum participants but not traversable in normal queries. Each participating agent independently reads the same source blocks, runs its own synthesis, and submits a signature: a cryptographic attestation that its output matches the pending block's content hash, along with its own confidence score. When the threshold is reached, Nexum promotes the block to `published` status and it becomes a first-class graph participant. If agents disagree — if a signing agent produces a different content hash — the conflict is recorded and the block remains pending; resolution is the customer's workflow.
+**How it works.** Each quorum task is framed as a yes/no question — a prompt that can only resolve to "yes" (affirm) or "no" (reject). The proposer submits a candidate block along with a quorum configuration specifying the eligible voters (by entity ID), the required threshold (e.g., 3-of-5), and the yes/no question to put to each. The block exists in a `pending` state — readable by quorum participants but not traversable in normal queries. Each voting agent independently reads the source blocks and the candidate block, evaluates the yes/no question, and submits its vote. When the threshold of "yes" votes is reached, Nexum promotes the block to `published` status. If the threshold cannot be reached (too many "no" votes or dissents), the block remains pending; the customer's workflow determines next steps.
 
-**What this provides.** A published block in a quorum corpus carries the signatures of every agent that attested to it. Any consumer can verify that N independent agents, operating on the same source material, reached the same conclusion. This is the graph-native equivalent of a multi-party audit: provenance includes not just who synthesized, but who vouched for it.
+The yes/no constraint is the key discipline. A question like "Does this block accurately represent the obligations stated in the source clauses?" is resolvable. A question like "Is this the best possible synthesis?" is not. Quorum prompts must be written for binary resolution, not comparative judgment.
 
-**Determinism and the source of disagreement.** The prompt or task definition for each quorum agent is written to be deterministic: same source blocks plus same engine should produce the same output. This is intentional. A panel of agents that disagree because their prompts were worded differently is producing noise, not signal — the divergence has no diagnostic meaning. Useful disagreement comes from controlled axes:
+**Quorum does not require large models.** Classification and yes/no evaluation are tasks well-suited to smaller, faster models. A quorum panel of five lightweight models voting on a binary prompt is cheaper and faster than a single frontier model producing unchecked synthesis — and provides a stronger reliability signal for the use cases where quorum is warranted.
 
-- **Different inference engines.** Quorum members run the same deterministic task definition against different models, model versions, or providers. Disagreement surfaces engine-level error.
-- **Non-deterministic graph traversal.** Members run the same task on the same engine but follow different traversal paths through the source graph — different seed blocks, different walk orders, different sampling of supporting evidence. Disagreement surfaces sensitivity to which evidence was surfaced.
+**What this provides.** A published block in a quorum corpus carries a record of every agent that voted, how they voted, and the question that was posed. Any consumer can verify that N independent agents affirmed the claim against the same source material. Provenance includes not just who synthesized, but who vouched for it and on what question.
 
-Both axes produce disagreement that carries information. Prompt variation does not, and should not be used as a diversity mechanism.
+**The source of useful disagreement.** The yes/no question is shared across all panel members; prompt variation is not a diversity axis. Useful disagreement — a "no" vote that prevents a false claim from publishing — comes from two controlled sources:
 
-**Scope.** `blocks:quorum_sign` is a distinct scope. An agent cannot participate in quorum signing unless it has been explicitly granted this scope on the target corpus. The quorum configuration — which agents are eligible, what threshold is required, and whether human signatures are permitted — is set by the customer when the corpus is created.
+- **Different inference engines.** Panel members run different models, model versions, or providers on the same question. Disagreement surfaces engine-level divergence.
+- **Non-deterministic graph traversal.** Panel members walk the source graph differently — different seed blocks, different walk orders, different evidence sampling. Disagreement surfaces sensitivity to which evidence was included.
+
+**Scope.** `blocks:quorum_sign` is a distinct scope. An agent cannot participate in quorum voting unless explicitly granted this scope on the target corpus. The quorum configuration — eligible voters, threshold, and whether human principals can vote — is set when the corpus is created.
 
 ### 9. Provenance on Every Block and Link
 
@@ -262,9 +288,11 @@ Every block carries an `origin` field: `source`, `synthesized`, or `external`. S
 
 ## Challenges
 
-### Background Grooming Without Slop
+### Unsupervised Synthesis and Background Grooming
 
-A graph this rich invites continuous background work even when no new source material arrives: re-evaluating contradictions, retiring stale syntheses, consolidating redundant drafts, refining poorly-grounded claims. Done well, the graph improves between ingest events. Done naively, background agents synthesize from prior synthesized output, drift away from source, and a quorum of similar agents will happily ratify the drift. This is the same failure mode the ML literature calls *model collapse*: each generation loses fidelity to the original signal.
+Nexum is an intelligence platform, not a search index. The difference is unsupervised synthesis: the system continues to improve its knowledge graph autonomously, between ingest events, without a human triggering each reasoning step. A product that only synthesizes when explicitly asked is a marginally better RAG pipeline. Continuous background grooming is what makes the graph increasingly useful over time — surfacing contradictions, retiring stale claims, connecting newly-ingested material to existing knowledge, and improving the quality of the synthesized layer.
+
+The engineering challenge is doing this without the graph degenerating. Done naively, background agents synthesize from prior synthesized output, drift away from source, and a quorum of similar agents will happily ratify the drift. This is the failure mode the ML literature calls *model collapse*: each generation loses fidelity to the original signal.
 
 Grooming that converges toward a global maximum — rather than degenerating into churn — requires three things: anchoring, adversarial review, and a measurable fitness function. Without all three, background activity is wasted compute at best and corpus pollution at worst.
 
@@ -308,6 +336,27 @@ The pattern is a **sampling audit, not a review queue**. A review queue assumes 
 **Tensions.** Question fatigue is real — bad questions burn the human's willingness to answer good ones. The Bayesian selector itself depends on uncertainty estimates that may be miscalibrated, in which case the system asks the wrong questions confidently. And humans answer easy questions and skip hard ones, biasing the sample toward the system's existing comfort zone; the selector must weight by skip rate and occasionally surface hard questions even when expected information gain is lower, to detect blind spots.
 
 This mechanism complements rather than replaces the automated grooming loop: the automated loop handles the bulk of low-stakes consolidation; the human-in-the-loop loop handles the small number of high-leverage uncertainties where a human's seconds-of-attention beat hours of agent reasoning.
+
+### Document Parsing Fidelity
+
+Every capability in Nexum depends on the quality of the initial parse. A block that misrepresents its source — because a table was flattened into garbage, because an OCR'd scan introduced phantom words, because a multi-column PDF was read in the wrong order — will generate false links, corrupt syntheses, and propagate error through the graph. Bad parsing is silent: the system has no way to know a block is wrong unless its content is compared against the original document by a human.
+
+Real documents are adversarial inputs. The formats Nexum must handle include:
+
+- **PDFs with complex layout**: multi-column text, footnotes, sidebars, watermarks, page headers that repeat across blocks.
+- **Scanned documents**: OCR output with recognition errors, degraded character quality, mixed handwriting and print.
+- **Redacted documents**: blacked-out passages that must be preserved as explicitly-redacted blocks, not silently dropped.
+- **Legal instruments with cross-references**: section numbering that changes between versions, defined terms that span dozens of pages.
+- **Exhibits and attachments**: embedded images, spreadsheets, or secondary PDFs that need to be extracted and ingested as linked sub-documents.
+
+The parsing layer is not a solved problem and should not be treated as one. The strategy:
+
+- **Use best-in-class third-party parsers** for the common cases (PDF, DOCX). Do not build a general parser. Evaluate regularly and switch when better options emerge.
+- **Block-level confidence scores on ingested blocks** — the parser emits a parse confidence alongside each block. Low-confidence blocks are flagged for human review before links are inferred from them.
+- **Source preservation** — the original document is always retained. Any block can be compared to its source passage. When a parse error is discovered and corrected, the block is re-versioned and downstream links and syntheses are marked stale.
+- **Parsing as a first-class failure mode** — the system surfaces parse-quality issues to administrators as a distinct signal, not mixed in with synthesis or link-quality metrics.
+
+The practical consequence: Nexum's intelligence is only as good as the text it starts from. Customers who ingest low-quality scans or poorly-structured PDFs will see degraded graph quality regardless of how well the rest of the system works. This should be communicated directly rather than abstracted away.
 
 ---
 
