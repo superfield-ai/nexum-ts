@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+.pytest_cache/
+results/g0_result.json
+results/g0_loss_curve.png
+results/g0_test_run.json
