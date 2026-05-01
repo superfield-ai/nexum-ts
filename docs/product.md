@@ -291,6 +291,24 @@ If none of these metrics move during a grooming cycle, the cycle was wasted. The
 
 A Grooming Agent reference template is a natural addition to the agent patterns above: runs on a schedule, computes the configured fitness metrics on a target corpus, identifies the highest-deficit area (most contradictions, lowest coverage, highest decay), and runs a targeted re-synthesis with adversarial pairing and tournament promotion. Each cycle emits a grooming report block — itself a graph participant, auditable and queryable.
 
+### Human-in-the-Loop Recalibration
+
+Fully automated grooming has a ceiling. Some claims sit at uncertainty levels the system cannot resolve from source alone — contested interpretations, ambiguous policies, judgment calls that require domain expertise. Periodically, the system needs ground truth that only a human expert can supply. The cost of getting that ground truth is what determines whether it happens.
+
+The pattern is a **sampling audit, not a review queue**. A review queue assumes the human will read every draft; that fails the moment the corpus is non-trivial. A sampling audit assumes the human will answer a small number of strategically chosen questions, and that those answers — combined with the graph's existing structure — are enough to recalibrate the rest.
+
+**Question selection is Bayesian.** A human-in-the-loop agent maintains a posterior over which claims in the corpus are correct, contested, or stale. On each interaction, it picks the question whose answer would most reduce the expected uncertainty across the graph: high prior uncertainty, high downstream impact (many synthesized blocks depend on it), and a clear yes/no formulation. Asking a human to confirm a claim that is already 99% certain wastes their attention; asking about a claim that affects nothing is equally wasteful. The selection function maximizes expected information gain per question.
+
+**Interface is designed for ambient attention.** Questions arrive on the user's phone as a short batch — five to ten yes/no items, swipe-to-answer. No reading the source material in-app. No essay-writing. If the question can't be answered confidently in seconds, it's the wrong question and the agent should have framed it more sharply or surfaced the uncertainty for a different mechanism.
+
+**Answers are first-class graph blocks.** Each human response is a synthesized block of `origin: human_signal`, linked to the claim it answered, with provenance: which human, when, and the question text as it was posed. Confidence scores on linked synthesized blocks update accordingly. A *yes* from a credentialed expert raises confidence; a *no* triggers re-grounding or marks the claim contested.
+
+**Sampling, not coverage.** The system does not aim to have every claim audited. It aims to have *enough* claims audited that the inferred quality of unaudited claims can be estimated statistically — like a financial auditor sampling 5% of transactions to bound the error rate of the other 95%. The grooming agent uses audit results to recalibrate its own fitness functions: if humans systematically reject the system's high-confidence claims in some subdomain, confidence scores in that subdomain are deflated globally.
+
+**Tensions.** Question fatigue is real — bad questions burn the human's willingness to answer good ones. The Bayesian selector itself depends on uncertainty estimates that may be miscalibrated, in which case the system asks the wrong questions confidently. And humans answer easy questions and skip hard ones, biasing the sample toward the system's existing comfort zone; the selector must weight by skip rate and occasionally surface hard questions even when expected information gain is lower, to detect blind spots.
+
+This mechanism complements rather than replaces the automated grooming loop: the automated loop handles the bulk of low-stakes consolidation; the human-in-the-loop loop handles the small number of high-leverage uncertainties where a human's seconds-of-attention beat hours of agent reasoning.
+
 ---
 
 ## Open Product Questions
