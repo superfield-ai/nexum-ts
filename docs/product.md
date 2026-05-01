@@ -24,7 +24,9 @@ The less obvious problem is forward-looking. Current LLMs consume linear text: a
 
 A flat file is an acceptable *report format* — a serialization of knowledge for human reading. But reports do not have to be the storage model. The same report can be generated on demand by loading the relevant branches of a document tree stored as structured nodes with typed relationships. When the output format and the storage format are decoupled, the knowledge base can serve multiple consumers: a human reading a rendered document, a current LLM consuming a text serialization, and a future reasoning engine traversing the graph directly.
 
-Nexum is built on this premise. The canonical representation is the graph; flat text is one rendering of it.
+A common counter-argument points to the current generation of coding and knowledge-work agents — Claude Code, Cursor, Aider, and similar — which do most of their reading via `grep`, `find`, and `cat` over flat files in a CLI environment. The argument runs: agents already navigate flat files effectively, so flat files must be the right substrate. This conflates the substrate with the tooling. Those agents read files that way because their tool harness is a Unix shell. The harness was chosen for portability and developer ergonomics, not because line-oriented text grep is the optimal way to query a knowledge base. An agent equipped with a graph query tool — semantic search over blocks and edges, link traversal, provenance filters — does not need to reconstruct meaning from regex hits. The CLI pattern is an artifact of how today's tools are deployed, not evidence of how knowledge should be stored.
+
+Nexum is built on this premise. The canonical representation is the graph; flat text is one rendering of it, and `grep`-over-files is one (limited) way to query it.
 
 ---
 
@@ -161,6 +163,13 @@ High-impact or mission-critical synthesized blocks can require multi-agent conse
 
 **What this provides.** A published block in a quorum corpus carries the signatures of every agent that attested to it. Any consumer can verify that N independent agents, operating on the same source material, reached the same conclusion. This is the graph-native equivalent of a multi-party audit: provenance includes not just who synthesized, but who vouched for it.
 
+**Determinism and the source of disagreement.** The prompt or task definition for each quorum agent is written to be deterministic: same source blocks plus same engine should produce the same output. This is intentional. A panel of agents that disagree because their prompts were worded differently is producing noise, not signal — the divergence has no diagnostic meaning. Useful disagreement comes from controlled axes:
+
+- **Different inference engines.** Quorum members run the same deterministic task definition against different models, model versions, or providers. Disagreement surfaces engine-level error.
+- **Non-deterministic graph traversal.** Members run the same task on the same engine but follow different traversal paths through the source graph — different seed blocks, different walk orders, different sampling of supporting evidence. Disagreement surfaces sensitivity to which evidence was surfaced.
+
+Both axes produce disagreement that carries information. Prompt variation does not, and should not be used as a diversity mechanism.
+
 **Scope.** `blocks:quorum_sign` is a distinct scope. An agent cannot participate in quorum signing unless it has been explicitly granted this scope on the target corpus. The quorum configuration — which agents are eligible, what threshold is required, and whether human signatures are permitted — is set by the customer when the corpus is created.
 
 ### 9. Provenance on Every Block and Link
@@ -235,7 +244,7 @@ The credibility evaluation logic is entirely within the agent — Nexum has no b
 
 **Pattern:** One agent (the *proposer*) synthesizes a candidate block from the source corpus and submits it with `status: pending_quorum` and a quorum configuration listing the eligible signing agents and the required threshold. The proposer then polls until the block is promoted or rejected. Each signing agent runs independently: it reads the same source block IDs, runs its own synthesis, and compares its output hash to the pending block's hash. If they match, it submits its signature via `POST /blocks/<id>/sign`. If they diverge, it submits a dissent with its alternative content; the conflict is recorded and the proposer is notified.
 
-The agents in a quorum panel should be meaningfully independent: different prompts, different model versions, or agents operating on different subsets of the source corpus and reconciling. A panel of identical agents running the same prompt provides redundancy against failure, not independence against error.
+The agents in a quorum panel should be meaningfully independent, but the independence must come from controlled axes — different inference engines (different models, versions, or providers) or non-deterministic graph traversal (different walk orders, seed blocks, or evidence sampling). The task prompt itself is written deterministically and is shared across the panel; varying the prompt across members produces noise without diagnostic meaning. A panel of identical agents running the same prompt on the same engine with the same traversal provides redundancy against failure, not independence against error.
 
 **What customers configure:** Which corpora require quorum, the eligible agent panel, the signing threshold, whether human principals can sign (and count toward the threshold), and the conflict-resolution workflow when agents dissent.
 
@@ -248,6 +257,39 @@ Source blocks originate from documents the customer ingested — filings, contra
 Synthesized blocks are agent outputs. They are claims with provenance, not ground truth. A synthesized block's reliability is a function of its sources: how many support it, whether any contradict it, and the credibility weights of the external documents in its lineage.
 
 Every block carries an `origin` field: `source`, `synthesized`, or `external`. Synthesized blocks carry the ID of the agent that produced them. External blocks carry source metadata. The graph does not treat synthesized blocks as less traversable — they are fully linkable — but their epistemic status is always visible in the API response.
+
+---
+
+## Challenges
+
+### Background Grooming Without Slop
+
+A graph this rich invites continuous background work even when no new source material arrives: re-evaluating contradictions, retiring stale syntheses, consolidating redundant drafts, refining poorly-grounded claims. Done well, the graph improves between ingest events. Done naively, background agents synthesize from prior synthesized output, drift away from source, and a quorum of similar agents will happily ratify the drift. This is the same failure mode the ML literature calls *model collapse*: each generation loses fidelity to the original signal.
+
+Grooming that converges toward a global maximum — rather than degenerating into churn — requires three things: anchoring, adversarial review, and a measurable fitness function. Without all three, background activity is wasted compute at best and corpus pollution at worst.
+
+**Fitness functions.** Improvement must be measurable per cycle. Candidates that fall out of the existing graph model:
+- **Source coverage** — fraction of source blocks reachable from a synthesized block via `sourced-from`
+- **Contradiction debt** — count of unresolved `contradicts` edges
+- **Redundancy** — synthesized blocks whose embeddings cluster tightly while sourcing different blocks
+- **Predictive accuracy** — when new source material arrives, how well did existing syntheses predict or accommodate it
+- **Human signal** — citations, reads, edits, dwell time on synthesized blocks, emitted by the customer's application and stored as block metadata
+
+If none of these metrics move during a grooming cycle, the cycle was wasted. The default action is no-op.
+
+**Mechanisms that push toward a global maximum:**
+
+- **Re-grounding pass.** Agents periodically re-synthesize claims by re-reading the *source* blocks, not the prior synthesized block. This breaks the synthesis-of-synthesis chain that causes collapse.
+- **Adversarial pairing.** Every writer agent is paired with a critic agent that has `corpus:read` only. The critic finds unsupported claims, stale reasoning, missing sources, and broken `sourced-from` links — and writes `contradicts` or `unsupported` edges against the writer's output. The writer cannot dismiss the critic; it can only respond by re-grounding.
+- **Tournament replacement.** A new synthesized block does not auto-replace its predecessor. It enters as a sibling draft. Promotion requires beating the incumbent on the configured fitness function — by quorum vote, predictive score, or source coverage. Prevents churn without improvement.
+- **Diversity in the quorum panel.** The quorum mechanism becomes a grooming mechanism only if panel agents are meaningfully different along controlled axes — different inference engines, or non-deterministic graph traversal. Prompt variation is not a valid diversity axis; the task definition is shared and deterministic. Identical agents on identical engines with identical traversal converge on identical errors.
+- **Confidence decay.** Synthesized blocks lose confidence over time unless re-validated against source. Forces periodic re-touching, but the only way to restore confidence is re-grounding, not re-wording.
+- **Bounded synthesis budget.** Cap the total synthesized volume per source block. Prevents accumulation of paraphrases. New syntheses must displace old ones.
+- **Random source-block audits.** A grooming agent picks source blocks at random and asks: do all synthesized blocks sourced from this still hold? Cheap probabilistic garbage collection.
+
+**Tensions.** Adversarial agents and quorum agents pull opposite ways — one rewards disagreement, the other agreement. They serve different stages: critics for draft refinement, quorum for publication. Conflating them produces deadlock or false consensus. And no procedure guarantees a global maximum on a graph this complex; the best available defenses are panel diversity (different agent panels run independent syntheses; the best wins on fitness) and external validation (newly-ingested source material arbitrates between competing syntheses retroactively).
+
+A Grooming Agent reference template is a natural addition to the agent patterns above: runs on a schedule, computes the configured fitness metrics on a target corpus, identifies the highest-deficit area (most contradictions, lowest coverage, highest decay), and runs a targeted re-synthesis with adversarial pairing and tournament promotion. Each cycle emits a grooming report block — itself a graph participant, auditable and queryable.
 
 ---
 
