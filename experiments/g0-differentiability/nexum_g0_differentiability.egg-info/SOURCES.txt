@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+nexum_g0_differentiability.egg-info/PKG-INFO
+nexum_g0_differentiability.egg-info/SOURCES.txt
+nexum_g0_differentiability.egg-info/dependency_links.txt
+nexum_g0_differentiability.egg-info/requires.txt
+nexum_g0_differentiability.egg-info/top_level.txt
+tests/__init__.py
+tests/test_g0.py
