@@ -184,36 +184,39 @@ A secondary and under-examined dimension is **GPU paging**: for extremely large 
 
 ---
 
-### Area 7 — Frozen Artifact Export (ONNX / Safetensors / GGUF from the Graph)
+### Area 7 — Differentiable Graph Model and Lossless Frozen Export
 
-**Question:** Can the Nexum graph be compiled into a standard optimized inference artifact — ONNX, Safetensors, or GGUF — that captures the knowledge state of the store at a point in time, enabling high-performance static inference where the latency penalty of graph-resident inference is unacceptable?
+**Question:** Can the Nexum block graph be formulated as a differentiable model — with a well-defined forward pass over typed-link-weighted node aggregation, trained via gradient descent / backpropagation — and can the trained graph state be serialized to a portable inference artifact *without distillation loss*, such that the frozen artifact and the live graph produce equivalent outputs?
 
-The colocated store is the live, authoritative source of knowledge. But some deployments — mobile, edge, latency-critical APIs, air-gapped environments — cannot tolerate the 20–50x latency penalty of retrieval-augmented inference even with GPU acceleration (Area 6). The answer is to treat the graph as a compiler input: periodically "freeze" its current state into a standard weights artifact, deploy that artifact for high-performance static inference, and accept that the frozen artifact is a snapshot — current as of its export timestamp — while the live graph continues to update.
+This is a foundational computer science research question, not an engineering optimization. The live graph is the authoritative model. The live graph is also, by hypothesis, a differentiable one: block embeddings are the parameters, typed link weights are learned coefficients, and the retrieval-augmented inference step (Area 3) is the forward pass. If the forward pass is differentiable, then the graph can be trained end-to-end — gradient descent updates block embeddings and link weights in place — without training a separate model at all.
 
-The research question is whether a graph-derived frozen artifact is competitive with a conventionally trained model of equivalent parameter count, and what the right export architecture looks like.
+The frozen export question follows from this: if the graph IS the model, then serializing it to ONNX is not compression (no distillation, no student model, no parameter reduction). It is serializing the actual model state — block embedding tensors + link weight tensors + the typed message-passing computation graph as ONNX operators — to a portable runtime. ONNX is the right target because it can represent arbitrary computation graphs, including message-passing GNNs, not just transformer architectures. GGUF is transformer-specific; Safetensors is weights-only with no computation graph. Neither can represent what the Nexum graph IS.
+
+"Without loss of signal" is achievable in principle because: the exported artifact contains the same parameters as the live graph (no parameter count reduction), and the same computation graph (message-passing over typed edges). Loss in a distilled model comes from compressing a large teacher into a smaller student. That is not what is happening here. The only structural loss is the discrete graph topology — which nodes connect to which — which must be encoded as sparse adjacency tensors in the ONNX model. Whether ONNX Runtime can execute this efficiently is the engineering question.
+
+This reframes the staleness problem precisely: a frozen ONNX export can only reason about blocks that existed at export time. New ingested blocks are invisible to the frozen model until re-export. The question is not "how accurate is the frozen model vs. the live graph on static tasks" (they should be equivalent by construction) — it is "how quickly does the frozen model degrade on tasks that require knowledge of recently ingested blocks."
 
 **Sub-questions:**
-- What graph-to-weights compilation strategies exist? Options include: distillation (train a small student model on graph-derived curriculum from Area 2), direct embedding matrix export (pack block embeddings into a retrieval-optimized weight format), and attention weight synthesis (construct transformer attention matrices from link weights and embeddings).
-- What is the fidelity loss from freezing — how quickly does a frozen artifact become stale relative to the live graph, and what is the right re-export cadence per institution type?
-- Can the typed link structure (rel_type, weight, layer) be encoded into the frozen artifact's weights such that the static model inherits relationship-aware behavior, rather than treating all knowledge as flat?
-- Is GGUF, Safetensors, or ONNX the right target format for a graph-distilled model? They have different trade-offs in quantization support, operator coverage, and ecosystem tooling.
-- What is the minimum corpus size / graph density at which a frozen graph-derived model outperforms a conventionally trained model of the same parameter count on domain-specific tasks?
+- Can the retrieval-augmented forward pass (Area 3) be made fully differentiable — specifically, can the discrete graph traversal (which is inherently non-differentiable) be relaxed into a continuous operation (e.g., soft attention over neighbors weighted by typed link confidence) that admits backpropagation?
+- Does gradient descent over block embeddings and link weights converge to useful optima? Does the learned graph outperform the non-trained graph (with randomly initialized link weights) on downstream tasks?
+- Does typed-link structure provide meaningful gradient signal — i.e., do `contradicts` and `supports` edges develop distinct learned weight profiles that improve task performance, or does the optimizer collapse them?
+- Can the full model state (block embedding matrix, link weight tensor, sparse adjacency tensor, message-passing computation graph) be expressed as a valid ONNX graph and executed by ONNX Runtime without approximation?
+- What is the throughput ratio between ONNX Runtime execution of the frozen graph model vs. live graph traversal for equivalent inference tasks? (This determines the efficiency gain of freezing.)
+- At what corpus update rate does re-export need to occur for the frozen artifact to remain within an acceptable accuracy bound of the live graph?
 
 **Hypotheses to test:**
-- **H7.1 [TIGHTEN]:** A student model distilled from a graph-derived curriculum (Area 2) and exported to GGUF achieves within 10% task accuracy of the retrieval-augmented client on the same benchmark, at 100x lower inference latency. *Tighten:* aggressive — name the student model architecture/parameter count, the named benchmark, and the eval protocol up front. Add a power analysis.
-- **H7.2 [KEEP — the one genuinely novel idea in Area 7]:** Encoding link weights and `rel_type` as soft attention biases during distillation produces a frozen model that outperforms a distilled model trained on flat corpus by > 8% on multi-hop reasoning tasks — demonstrating that the typed-link graph structure survives compilation into weights.
-- **H7.3 [TIGHTEN]:** The staleness penalty of a frozen artifact grows non-trivially with corpus update rate. *Tighten:* the originally asserted functional form ("super-linear above 1000 blocks/day") is not derived. Drop the form. Run a staleness sweep across update rates and report the measured curve, then fit post-hoc — do not pre-commit to a shape.
-- ~~H7.4 [DEMOTE → KPI]:~~ "GGUF export pipeline runs in < 4 hours on a 10M-block corpus." *This is an engineering timing target, not a hypothesis.* Track as a roadmap KPI on the export-pipeline workstream.
-- **H7.5 [TIGHTEN → engineering bake-off]:** Safetensors vs. ONNX vs. GGUF as intermediate formats. *Tighten:* run as an engineering bake-off with a written decision memo, not as a research finding. The interesting comparison is partial-loading semantics for the embedding matrix; framing it as a "hypothesis" overstates its novelty.
-
-> **Risk concentration:** Area 7 depends on Area 2 producing a non-trivial typed-link curriculum signal. If H2.1–H2.4 come back lukewarm, Area 7's distillation pipeline collapses to standard fine-tuning and loses its differentiating story. The remediation Step 6 wedge demo is specifically structured to surface this dependency early — Area 7 staffing waits until the Area 2 signal is observed.
+- **H7.1 [CORE — the central thesis of this area]:** The typed-link-weighted message-passing forward pass over the Nexum block graph is differentiable via soft attention relaxation of discrete traversal, and gradient descent over block embeddings and link weights converges in fewer than 10K gradient steps on domain-specific tasks. *Kill criterion:* if loss does not decrease monotonically within 1K steps on a 10K-block synthetic corpus, the differentiability claim fails and the area reverts to distillation (Area 2 curriculum → student model).
+- **H7.2 [KEEP — typed link signal]:** `contradicts` and `supports` link weights develop statistically distinct learned profiles after training (measured by cosine distance between the weight vectors of same-type vs. cross-type edges), demonstrating that typed link structure carries independent gradient signal and is not collapsed by the optimizer.
+- **H7.3 [KEEP — lossless export]:** An ONNX-serialized Nexum graph model produces outputs within 1% of the live graph on a held-out eval set (equivalent task accuracy, measured by attribution F1 and answer accuracy), confirming that serialization introduces no approximation loss beyond floating-point rounding.
+- **H7.4 [KEEP — staleness curve]:** The accuracy degradation of a frozen ONNX artifact relative to the live graph follows a measurable curve as a function of corpus update rate and time-since-export. Run a staleness sweep; report the measured curve; fit post-hoc. Do not pre-commit to a functional form.
+- **H7.5 [KEEP — efficiency]:** ONNX Runtime execution of the frozen graph model achieves at least 10x higher throughput than live graph traversal on equivalent inference tasks, by replacing dynamic Postgres traversal with pre-compiled sparse matrix operations on fixed adjacency tensors.
 
 **Experiments:**
-- Distillation pipeline: implement graph → curriculum (Area 2 BFS walk) → student model fine-tune → GGUF export. Evaluate on 3 domain benchmarks vs. graph-resident client and vs. conventionally trained baseline.
-- Link-encoded distillation: compare two distillation runs — (a) flat sequence training, (b) attention-bias-injected training using link weights. Measure multi-hop reasoning accuracy delta.
-- Staleness curve: export a frozen artifact daily for 2 weeks while continuously ingesting updates into the live graph. Measure accuracy on a stable held-out eval set each day. Plot accuracy vs. days-since-export at different update rates (10, 100, 1000, 10K blocks/day).
-- Export pipeline timing: instrument the full export pipeline. Measure wall-clock time per stage (curriculum generation, distillation training, quantization, GGUF pack) at corpus sizes 1M, 5M, 10M blocks.
-- Format comparison: export the same distilled model to ONNX, Safetensors, and GGUF. Measure cold-load time, warm inference latency, quantization fidelity at int8 and int4, and ecosystem tooling compatibility (llama.cpp, HuggingFace transformers, ONNX Runtime).
+- Differentiability test: implement a minimal typed-link message-passing forward pass with soft attention relaxation. Train on a 10K-block synthetic corpus with known labeled relationships. Plot loss curve; verify gradient flow through link weight parameters; check for optimizer collapse on typed edges.
+- Convergence benchmark: train the differentiable graph model on a 100K-block legal corpus. Evaluate on clause extraction and contradiction detection before and after training. Compare against the non-trained graph (fixed link weights) and against a conventionally fine-tuned transformer of equivalent parameter count.
+- ONNX serialization: export the trained graph (block embedding matrix, link weight tensor, sparse adjacency tensor) as an ONNX model. Verify round-trip: run the ONNX model on a held-out eval set; compare outputs to live graph inference on the same inputs. Measure accuracy delta and floating-point error.
+- Staleness curve: export a frozen ONNX artifact, then continuously ingest updates into the live graph. Evaluate both on a stable held-out set daily for 2 weeks. Plot accuracy delta vs. days-since-export at corpus update rates of 10, 100, 1K, 10K blocks/day.
+- Throughput comparison: measure inference throughput (queries/sec) for (a) live graph traversal via Postgres, (b) ONNX Runtime on the frozen artifact, (c) GPU-accelerated ONNX Runtime. Target: quantify the efficiency gain of freezing and identify the latency floor.
 
 ---
 
@@ -223,32 +226,123 @@ The research question is whether a graph-derived frozen artifact is competitive 
 
 ---
 
-## Dependency Order
+## Research Sequencing — Bayesian Decision Program
 
-The areas are not fully independent. Suggested sequencing:
+The research areas are not fully independent, and their value is not equal. The goal is to answer the highest-uncertainty, highest-impact questions first so that negative results terminate expensive downstream work early rather than late. Each gate is the smallest experiment that resolves a binary decision with high confidence.
+
+### Decision Gates
+
+Five gates determine the shape of the program. Each gate produces a binary outcome that changes which subsequent work is staffed.
+
+| Gate | Question | Hypothesis | Signal by | Stakes if NO |
+|---|---|---|---|---|
+| **G0** | Is the graph differentiable? | H7.1 spike | Week 2 | Area 7 reverts to distillation; Area 2 becomes primary training mechanism |
+| **G1** | Does Postgres scale to target corpus? | H1.1 | Week 4 | Graph DB migration required; blocks Areas 3, 5, 6 until resolved |
+| **G2** | Does provenance beat vanilla RAG visibly? | H4.4 wedge demo | Week 6 | Program narrows to pure systems research (Areas 1, 5, 6 only); curriculum and frozen-export shelved |
+| **G3** | Does typed-link structure carry independent gradient signal? | H7.2 | Week 10 | Link types useful for retrieval only, not gradient training; simplify link model |
+| **G4** | Is ONNX serialization lossless? | H7.3 spike | Week 10 | Frozen export requires distillation (lossy); changes product tier story |
+
+G0 and G2 are the program's most load-bearing gates. G0 determines whether the graph is a differentiable model or a retrieval substrate; G2 determines whether the product story holds for buyers. Both must return positive before significant research investment continues beyond Phase 1.
+
+---
+
+### Phase 0 — Core Thesis Spikes (Weeks 1–2)
+
+Run the two smallest experiments that resolve the highest-uncertainty questions. Both run in parallel; neither depends on the other.
+
+**Spike A — Differentiability (G0 / H7.1 kill criterion)**
+Implement a minimal typed-link message-passing forward pass on a synthetic 10K-block corpus. Use soft attention relaxation over neighbor edges (weighted by link confidence × type embedding). Run backpropagation. Pass criterion: loss decreases monotonically within 1K gradient steps. Time budget: 5 engineering days. If loss does not decrease — gradient vanishes, collapses, or oscillates — G0 fails immediately.
+
+**Spike B — Postgres scale floor (G1 / H1.1)**
+Build a 1M-block synthetic corpus in Postgres + pgvector. Measure P50/P99 query latency for all three query modes. Compare against a 5M-block corpus on the same schema. Pass criterion: P99 latency stays below 500ms at 5M blocks with the target hardware budget. Time budget: 3 engineering days.
+
+**G0 YES → Phase 1A (differentiable program)**
+**G0 NO → Phase 1B (retrieval-only program)**
+
+---
+
+### Phase 1A — Differentiable Graph Program (Weeks 3–8, if G0 confirmed)
+
+**Week 3–4: ONNX losslessness spike (G4 / H7.3)**
+Train the differentiable graph model from Spike A on the 10K-block corpus. Export to ONNX. Run held-out eval on live graph and on ONNX Runtime. Measure accuracy delta. Pass criterion: < 1% delta on attribution F1. Time budget: 4 days. This resolves G4 early while the model is still small and fast to iterate.
+
+**Week 3–6: Wedge demo (G2 / H4.4)**
+Build an end-to-end demo on one legal or medical partner corpus. Combine block-level provenance (H4.4), real-time ingest (H5.1/H5.2), and the typed-link retrieval forward pass (Area 3). Run head-to-head against vanilla RAG on the same corpus. Pass criterion: visibly better attribution accuracy on a held-out question set; at least two design partners engage within four weeks of demo. This is the program's product-market fit gate.
+
+**Week 4–8: Storage benchmark (Area 1 full)**
+Run the full corpus scale experiment (1M / 5M / 20M / 100M blocks) across storage configurations. Results inform the Area 5 (update semantics) and Area 6 (GPU) experiments. Runs in parallel with the wedge demo — no gate dependency.
+
+**Week 6–10: Forward pass quality (G3 / H7.2)**
+Extend the differentiable model to a 100K-block legal corpus. Measure whether `contradicts` and `supports` edge weights develop distinct learned profiles (cosine distance between weight vectors of same-type vs. cross-type edges). Pass criterion: statistically significant separation at p < 0.05. If G3 fails, typed link types are dropped from the gradient training axis and the model reduces to standard GNN aggregation over untyped edges.
+
+---
+
+### Phase 1B — Retrieval-Only Program (Weeks 3–8, if G0 fails)
+
+Area 2 (Training Curriculum) becomes the primary research direction. The graph is a retrieval and provenance substrate; training a model over it means constructing a curriculum and fine-tuning a separate student model.
+
+**Week 3–6: Curriculum construction (H2.1 spike)**
+Construct contrastive pairs from `contradicts` and `supports` links on a 10K-contract legal corpus. Fine-tune a base LM on three curricula: (a) flat random, (b) BFS structural walk, (c) typed contrastive pairs. Evaluate on clause extraction and contradiction detection. This replaces G0 as the primary gating experiment.
+
+**Week 6–10: Distillation pipeline**
+If H2.1 confirms signal, build the full curriculum → student model → GGUF export pipeline. Area 7 in this branch is distillation-based, not lossless serialization. The frozen artifact is competitive with the retrieval client but is not equivalent to it.
+
+The wedge demo (G2) still runs in Phase 1B — provenance and retrieval quality do not depend on differentiability.
+
+---
+
+### Phase 2 — Convergence (Weeks 8–14, both branches)
+
+At this point G1, G2, G3, G4 are resolved. The remaining work fills in the program:
+
+- **Area 3 (Retrieval-Augmented Inference)** — latency benchmark, cache tier experiment, sparse attention ablation. Depends on Area 1 storage decisions (G1) and the forward pass definition confirmed in Phase 1.
+- **Area 4 (Provenance & Compositional Reasoning)** — attribution audit, multi-hop compositional reasoning benchmark. Depends on Phase 1 wedge demo infrastructure.
+- **Area 5 (Update Semantics)** — insertion-to-retrieval latency breakdown, partial-visibility eval, version atomicity test. Runs on the storage stack confirmed in Phase 1.
+
+---
+
+### Phase 3 — Optimization (Weeks 12–20)
+
+- **Area 6 (GPU Acceleration)** — depends on Area 5 latency baselines identifying the binding constraint. HNSW vs. embedding vs. aggregation as the bottleneck determines which GPU experiment is run first.
+- **Area 7 (Full run)** — if G0 and G4 confirmed (lossless path): staleness curve, throughput comparison, ONNX Runtime optimization. If G0 failed (distillation path): staleness curve, format comparison bake-off.
+- **Area 2 (Training Curriculum)** — if G0 confirmed (secondary role): run H2.1–H2.4 experiments to characterize the signal that typed-link curriculum provides on top of the gradient-trained graph. Not required for the core product; characterizes the offline fine-tuning use case.
+
+---
+
+### Dependency Tree
 
 ```
-Area 1 (Storage Fitness)
-    │
-    ├── Area 2 (Training Curriculum)      ← depends on Area 1 baselines
-    │
-    ├── Area 3 (Retrieval-Aug. Inference) ← depends on Area 1 storage decisions
-    │       │
-    │       └── Area 4 (Provenance &       ← depends on Area 2 + Area 3 results
-    │             Single-Store Properties)
-    │
-    ├── Area 5 (Update Semantics)         ← depends on Area 1 + Area 3; governs
-    │                                        the live-consistency guarantees that
-    │                                        Areas 3 and 4 assume
-    │
-    ├── Area 6 (GPU Acceleration)         ← depends on Area 5 latency baselines;
-    │                                        optimizes the bottlenecks Area 5 identifies
-    │
-    └── Area 7 (Frozen Artifact Export)   ← depends on Area 2 (curriculum) for
-                                             distillation input; produces the
-                                             high-performance complement to the
-                                             live graph-resident client
+Phase 0: G0 spike ──────────────── G1 spike (Postgres scale)
+           │
+     [G0 YES]           [G0 NO]
+           │                  │
+    Phase 1A              Phase 1B
+    (differentiable)      (retrieval-only)
+    ├── G4 spike          └── H2.1 curriculum spike
+    ├── G2 wedge demo         └── distillation pipeline
+    ├── Area 1 full
+    └── G3 (typed signal)
+           │
+    Phase 2 (both branches converge here)
+    ├── Area 3 (Retrieval-Augmented Inference)
+    ├── Area 4 (Provenance & Compositional Reasoning)
+    └── Area 5 (Update Semantics)
+           │
+    Phase 3 (optimization)
+    ├── Area 6 (GPU Acceleration)      ← bottleneck identified by Area 5
+    ├── Area 7 (full run)              ← lossless (G0+G4 YES) or distillation (G0 NO)
+    └── Area 2 (Training Curriculum)   ← secondary if G0 YES; primary if G0 NO
 ```
+
+---
+
+### Program Kill Criteria
+
+The program terminates or narrows at two hard gates:
+
+1. **G2 fails (wedge demo):** If block-level provenance does not produce visibly better answers than vanilla RAG on a real partner corpus by Week 6, and no design partners engage, the program narrows immediately to pure systems research — Areas 1, 5, 6 only. All curriculum, retrieval-inference, and frozen-export work is shelved until a customer asks for it. No further staffing on Areas 2, 3, 4, 7.
+
+2. **G0 and H2.1 both fail:** If the graph is not differentiable (G0) and typed-link contrastive pairs do not improve fine-tuning (H2.1), the typed link layer has no training signal — only retrieval value. The program narrows to: block-level provenance + real-time ingest + attribution (Areas 1, 3, 4, 5) as a pure retrieval product. The research thesis is falsified; this is a valid outcome.
 
 ---
 
@@ -282,7 +376,7 @@ These are not yet falsifiable but need conceptual resolution before experiments 
 2. **Curriculum ordering:** BFS/DFS over the link graph is a natural walk, but is there a principled way to derive a total ordering of blocks that maximizes information gain per training step?
 3. **Update atomicity:** When a block is updated in a live production corpus, which downstream inference operations need to be invalidated? Can a dependency graph over cached inference results be maintained cheaply?
 4. **Embedding drift:** If blocks share a UUID across versions but the content changes (via `parent_block_id` lineage), the embedding is stale. How do we detect and manage embedding drift without re-embedding the entire corpus?
-5. **Multi-tenancy:** Different institutions have different privacy requirements. Does the colocation property (one store = training + retrieval + serving) create unacceptable data leakage risk in shared-infrastructure deployments?
+5. ~~**Multi-tenancy / intra-org permissions.**~~ Resolved: this is a product requirement, not a research question. A corpus deployment serves many users with different roles and permissions. The graph, database, and client must enforce access control natively — at the corpus level and block level — as specified in the product's principal and privacy model. No experiment needed; the design is in the product spec.
 
 ---
 
@@ -316,6 +410,8 @@ These scaffolds live alongside this plan rather than inline:
 
 Per-hypothesis frontmatter is being extended (in `docs/research/hypotheses/`) to include: `baselines:`, `compute_budget:`, `design_partner_question:`, `demo:`, `kill_criterion_spike:`. Any hypothesis whose `design_partner_question` is empty after Step 4 of the remediation plan is reclassified as exploratory and not staffed until a partner asks.
 
-### The wedge demo (remediation Step 6)
+### The wedge demo (Gate G2)
 
-Sequencing is gated on a single end-to-end wedge demo combining **H4.4 (block-level provenance)** + a slice of **H2.1 (typed-link contrastive signal)** + **H5.1 / H5.2 (real-time ingest)** on one legal or medical partner corpus. If the wedge does not produce visibly better answers than vanilla RAG and two design partners do not engage within four weeks, the program reverts to a pure systems-research project — Areas 1, 5, 6 only — and the curriculum / retrieval-inference / frozen-export thread is shelved until a customer pulls. This is the program's null-result protocol.
+The wedge demo is Gate G2 in the Bayesian sequencing plan. It runs in Phase 1 (Weeks 3–6), in parallel with the ONNX losslessness spike (G4) and the Area 1 storage benchmark. It combines **H4.4 (block-level provenance)** + the typed-link retrieval forward pass (Area 3) + **H5.1 / H5.2 (real-time ingest)** on one legal or medical partner corpus. It runs regardless of G0 (differentiability) outcome — provenance quality does not depend on whether the graph is gradient-trainable.
+
+Pass criterion: the demo produces visibly better attribution accuracy than vanilla RAG on a held-out question set, and at least two design partners engage within four weeks of the demo. If this criterion is not met, the program narrows immediately to pure systems research — Areas 1, 5, 6 only — and the curriculum / retrieval-inference / frozen-export work is shelved until a customer asks for it. This is the program's product-market fit gate and its null-result protocol.
