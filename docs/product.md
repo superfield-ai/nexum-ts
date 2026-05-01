@@ -14,6 +14,20 @@ Nexum makes those connections explicit, machine-readable, and continuously maint
 
 ---
 
+## The Flat File Ceiling
+
+Markdown files — and tools like Obsidian that layer wiki-like linking on top of them — are the current state of the art for personal knowledge management. For a single person working alone, they are nearly optimal: human-readable, version-controllable, portable, and cheap to reason over.
+
+The scaling problems are obvious. Search degrades. Ownership fragments. Cross-document consistency breaks silently. Refactoring propagates manually or not at all.
+
+The less obvious problem is forward-looking. Current LLMs consume linear text: a document is flattened into a token sequence, and the model reasons over that sequence. This is a first-generation constraint, not a permanent one. Future reasoning machines — whether trained differently or equipped with richer I/O — may operate natively on structured graphs: querying subgraphs, traversing edges, operating on block-level nodes rather than character streams. A knowledge base built as flat files is not ready for that interface.
+
+A flat file is an acceptable *report format* — a serialization of knowledge for human reading. But reports do not have to be the storage model. The same report can be generated on demand by loading the relevant branches of a document tree stored as structured nodes with typed relationships. When the output format and the storage format are decoupled, the knowledge base can serve multiple consumers: a human reading a rendered document, a current LLM consuming a text serialization, and a future reasoning engine traversing the graph directly.
+
+Nexum is built on this premise. The canonical representation is the graph; flat text is one rendering of it.
+
+---
+
 ## Who It's For
 
 Nexum is a platform API. Direct customers are teams building document-intelligence products or internal tools — not end users navigating a corpus manually.
@@ -24,6 +38,32 @@ Strong fits:
 - **Knowledge management platform builders** who need a reliable graph layer beneath their own UX
 
 The underlying use cases span any knowledge-intensive domain: legal, finance, healthcare, operations, strategy. Nexum is not optimized for any single vertical.
+
+---
+
+## Initial Target Use Cases
+
+Three use cases anchor the initial product — chosen because each has a clear graph structure, an existing pain point that flat files make worse, and a natural agent-consumption story.
+
+### Software Documentation
+
+A software project produces at least four distinct document types that must stay consistent with one another: product specification, implementation notes, issue tracker, and end-user support documentation. In practice they diverge constantly. A decision recorded in a product doc is not propagated to the implementation notes. A bug in the issue tracker is closed but the user-facing docs still describe the broken behavior. A support ticket reveals an undocumented edge case that nobody links to the spec.
+
+Nexum makes the links between these document types explicit and machine-maintained. An agent can flag a contradiction between an open issue and the current spec, or identify support tickets that describe behavior not covered in end-user documentation. The graph is the connective tissue the project already needs but currently maintains by hand.
+
+### Legal Case Files
+
+A legal matter generates a large, interconnected document set: pleadings, exhibits, contracts, correspondence, deposition transcripts, court orders, and research memos. Relevant passages span dozens of documents. Contradictions between a deposition and a contract clause, or between two expert declarations, are exactly the kind of cross-document relationship that wins or loses a case — and exactly the kind that lawyers currently find by reading everything twice.
+
+Nexum ingests the case corpus, resolves structural citations, and infers semantic and logical links across the full document set. Agents can synthesize profiles of key facts, flag contradictions between witness statements, and maintain running memos that update as new material is filed. Provenance is preserved throughout — every synthesized claim traces to the source block that supports it.
+
+### Company Handbook
+
+A handbook is a codification of how a company operates: policies, processes, decision rights, escalation paths, standards of conduct, and institutional knowledge that would otherwise live only in the heads of long-tenured employees. Done well, it is both a human reference and an agent-consumable procedure library.
+
+The problem with existing handbooks is maintenance. They are written once, go stale, and contradict the actual policies documented in more recent Slack threads, board resolutions, or operational runbooks. Nexum treats the handbook as a living synthesized artifact: the handbook agent polls the internal corpus for new source material — decisions, postmortems, updated policies — and revises the affected handbook sections when contradictions appear. The handbook is always a synthesis of the current source record, not a snapshot from the last time someone updated a Google Doc.
+
+Because every handbook block traces to source blocks, agents consuming the handbook for automated decision-making can verify provenance and flag when the underlying source has changed. The handbook is not just for humans reading a rendered page; it is a queryable knowledge base that agents can traverse.
 
 ---
 
@@ -93,6 +133,8 @@ Three query modes, all returning block IDs with relevance scores and link contex
 
 Results across all modes include provenance: who created each link, when, and with what confidence.
 
+**Edge embeddings.** Both nodes (blocks) and edges (links) carry vector embeddings. A semantic query can therefore surface relevant *relationships*, not just relevant blocks. For example: a query for "obligations that override earlier commitments" can match `overrides` links whose embedded representation scores highly against that query, independent of whether the individual blocks rank well in isolation. This makes the graph traversable by meaning, not just by structure.
+
 ### 6. Polling Cursor
 
 Agents discover new ingest by polling `GET /blocks?corpus_id=X&since=<ISO_TIMESTAMP>`. The response returns all blocks created or updated after the cursor, along with their link state. Agents advance their cursor on each successful poll and repeat on their own schedule.
@@ -111,7 +153,17 @@ The API accepts:
 
 Nexum automatically creates `sourced-from` links between the synthesized block and its sources. If a source block is later corrected or retracted, the derived synthesized blocks are marked stale and returned with a `stale: true` flag on subsequent reads — agents discover staleness on their next poll cycle.
 
-### 8. Provenance on Every Block and Link
+### 8. Synthesis Quorum
+
+High-impact or mission-critical synthesized blocks can require multi-agent consensus before being published to the graph. The pattern draws from aerospace voting systems and blockchain multi-signature schemes: no single agent's output is trusted unilaterally; the block is only committed once a quorum of independent agents has signed off on the same conclusion.
+
+**How it works.** A block submitted to the synthesis API can be marked `status: pending_quorum` with a `quorum` configuration specifying the required signatories (by entity ID) and the threshold (e.g., 3-of-5). The block exists in the graph in a `pending` state — readable by quorum participants but not traversable in normal queries. Each participating agent independently reads the same source blocks, runs its own synthesis, and submits a signature: a cryptographic attestation that its output matches the pending block's content hash, along with its own confidence score. When the threshold is reached, Nexum promotes the block to `published` status and it becomes a first-class graph participant. If agents disagree — if a signing agent produces a different content hash — the conflict is recorded and the block remains pending; resolution is the customer's workflow.
+
+**What this provides.** A published block in a quorum corpus carries the signatures of every agent that attested to it. Any consumer can verify that N independent agents, operating on the same source material, reached the same conclusion. This is the graph-native equivalent of a multi-party audit: provenance includes not just who synthesized, but who vouched for it.
+
+**Scope.** `blocks:quorum_sign` is a distinct scope. An agent cannot participate in quorum signing unless it has been explicitly granted this scope on the target corpus. The quorum configuration — which agents are eligible, what threshold is required, and whether human signatures are permitted — is set by the customer when the corpus is created.
+
+### 9. Provenance on Every Block and Link
 
 Every block and link carries full provenance: origin type (`source` / `synthesized` / `external`), creator (parser, embedding model, AI agent, human, caller-specified agent ID), timestamp, confidence, and — for external blocks — source metadata. Provenance is queryable and filterable.
 
@@ -121,6 +173,8 @@ Every block and link carries full provenance: origin type (`source` / `synthesiz
 
 **Block-level precision.** Links resolve to specific paragraphs and lines, not documents. Queries return the exact block, not the document it came from.
 
+**Graph-native embeddings.** Nodes and edges both carry vector embeddings. Semantic search operates over the full graph — surfacing relevant relationships, not just relevant documents. A future reasoning engine with native graph I/O can query the same substrate directly.
+
 **Non-destructive.** Source documents are never modified. The graph is maintained separately and layered over the originals.
 
 **Versioned and auditable.** Full version history on every document. Unchanged blocks share identity and graph connections across versions. Modified blocks carry lineage back to their predecessors.
@@ -128,6 +182,8 @@ Every block and link carries full provenance: origin type (`source` / `synthesiz
 **Incrementally updatable.** Ingest a new document or a new version and only the affected blocks and links are recomputed.
 
 **External-source aware.** External documents are first-class ingest targets. Credibility weights and source metadata propagate through the graph so agents can reason about the reliability of synthesized claims.
+
+**Quorum-gated publishing.** High-stakes synthesized blocks can require multi-agent consensus before entering the traversable graph. Published blocks in a quorum corpus carry cryptographic attestations from every signing agent — a verifiable record that independent agents reached the same conclusion from the same source material.
 
 ---
 
@@ -170,6 +226,18 @@ This pattern illustrates the general external-source capability. Any agent with 
 **Poll loop:** On each cycle, polls for new `origin: external` blocks. For each new block, evaluates the source against configurable criteria — publication history, domain reputation, cross-referenceability with other sources in the corpus, freshness. Writes a synthesized credibility block linked to the source block with a numeric score and a short rationale. Agents that synthesize from external material query for the linked credibility block before including the source in their output.
 
 The credibility evaluation logic is entirely within the agent — Nexum has no built-in taxonomy. Different deployments implement different credibility models appropriate to their domain. Nexum ships this template as a starting point; the evaluation prompt and scoring rubric are customer-defined.
+
+### Quorum Agent Panel (Reference Template)
+
+**Registration:** Multiple agents, each `type: agent`, scopes: `corpus:read` (source corpus), `blocks:quorum_sign` (quorum corpus). No single agent has `corpus:write` on the quorum corpus directly — publishing is gated by the quorum mechanism.
+
+**Purpose:** Ensures that high-stakes synthesized intelligence — risk assessments, legal findings, mission-critical operational decisions — is attested to by multiple independent reasoners before entering the traversable graph. Modeled on aerospace voting systems (where flight-critical computations are run on separate hardware and cross-checked) and blockchain multi-signature schemes (where funds cannot move without N-of-M keyholders signing).
+
+**Pattern:** One agent (the *proposer*) synthesizes a candidate block from the source corpus and submits it with `status: pending_quorum` and a quorum configuration listing the eligible signing agents and the required threshold. The proposer then polls until the block is promoted or rejected. Each signing agent runs independently: it reads the same source block IDs, runs its own synthesis, and compares its output hash to the pending block's hash. If they match, it submits its signature via `POST /blocks/<id>/sign`. If they diverge, it submits a dissent with its alternative content; the conflict is recorded and the proposer is notified.
+
+The agents in a quorum panel should be meaningfully independent: different prompts, different model versions, or agents operating on different subsets of the source corpus and reconciling. A panel of identical agents running the same prompt provides redundancy against failure, not independence against error.
+
+**What customers configure:** Which corpora require quorum, the eligible agent panel, the signing threshold, whether human principals can sign (and count toward the threshold), and the conflict-resolution workflow when agents dissent.
 
 ---
 
