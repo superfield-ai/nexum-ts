@@ -5,6 +5,15 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "vector";
 
+-- Corpora: optional grouping of documents (e.g. a legislative archive, a case file)
+CREATE TABLE IF NOT EXISTS corpora (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL,
+    description TEXT,
+    meta        JSONB,
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+
 -- Document registry: the logical identity of a document across all its versions
 CREATE TABLE IF NOT EXISTS documents (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -15,6 +24,12 @@ CREATE TABLE IF NOT EXISTS documents (
     meta               JSONB,
     created_at         TIMESTAMPTZ DEFAULT now()
 );
+
+-- Idempotently add corpus_id and external_id columns to documents
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS corpus_id UUID REFERENCES corpora(id);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS external_id TEXT;
+CREATE INDEX IF NOT EXISTS documents_corpus_id_idx ON documents (corpus_id);
+CREATE INDEX IF NOT EXISTS documents_corpus_id_external_id_idx ON documents (corpus_id, external_id);
 
 -- One row per ingested version of a document
 CREATE TABLE IF NOT EXISTS document_versions (
@@ -56,14 +71,19 @@ CREATE TABLE IF NOT EXISTS blocks (
     line_end        INTEGER,
     eid             TEXT,                    -- Akoma Ntoso eId if source is AKN
     parent_block_id UUID REFERENCES blocks(id), -- lineage: prior version of this block
-    embedding       vector(1536),
+    -- Dimension set for all-MiniLM-L6-v2 (384).
+    -- To change: ALTER TABLE blocks ALTER COLUMN embedding TYPE vector(N); then drop and rebuild blocks_embedding_hnsw_idx.
+    embedding       vector(384),
     tsv             TSVECTOR
                     GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     meta            JSONB                    -- raw_refs, section context, page, etc.
 );
 
 CREATE INDEX IF NOT EXISTS blocks_doc_content_hash_idx ON blocks (doc_id, content_hash);
-CREATE INDEX IF NOT EXISTS blocks_embedding_hnsw_idx ON blocks USING hnsw (embedding vector_cosine_ops);
+-- Drop and recreate HNSW index to ensure it matches the current embedding dimension (384).
+-- If the column type changes in future, repeat this pattern.
+DROP INDEX IF EXISTS blocks_embedding_hnsw_idx;
+CREATE INDEX blocks_embedding_hnsw_idx ON blocks USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS blocks_tsv_gin_idx ON blocks USING gin (tsv);
 CREATE INDEX IF NOT EXISTS blocks_parent_block_id_idx ON blocks (parent_block_id);
 
