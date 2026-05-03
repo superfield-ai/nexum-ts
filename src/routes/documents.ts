@@ -3,6 +3,7 @@ import { queryOne } from '../db/queries.js'
 import { parseText } from '../ingest/parse-text.js'
 import { parseMarkdown } from '../ingest/parse-markdown.js'
 import { parsePdf } from '../ingest/parse-pdf.js'
+import { parseDocx } from '../ingest/parse-docx.js'
 import { contentHash } from '../ingest/dedup.js'
 import type { ParsedBlock } from '../ingest/parse-text.js'
 
@@ -13,7 +14,7 @@ route('POST', '/documents', async (req, res) => {
   if (!body?.corpus_id) return send(res, 400, { error: 'corpus_id is required' })
   if (!body?.title) return send(res, 400, { error: 'title is required' })
   if (!body?.content) return send(res, 400, { error: 'content is required' })
-  if (!['text', 'markdown', 'pdf'].includes(body?.format)) return send(res, 400, { error: 'format must be text, markdown, or pdf' })
+  if (!['text', 'markdown', 'pdf', 'docx'].includes(body?.format)) return send(res, 400, { error: 'format must be text, markdown, pdf, or docx' })
 
   // Check corpus exists
   const corpus = await queryOne('SELECT id FROM corpora WHERE id = $1', [body.corpus_id])
@@ -26,6 +27,9 @@ route('POST', '/documents', async (req, res) => {
     parsedBlocks = await parsePdf(pdfBuffer)
   } else if (body.format === 'markdown') {
     parsedBlocks = parseMarkdown(body.content)
+  } else if (body.format === 'docx') {
+    const docxBuffer = Buffer.from(body.content, 'base64')
+    parsedBlocks = await parseDocx(docxBuffer)
   } else {
     parsedBlocks = parseText(body.content)
   }
