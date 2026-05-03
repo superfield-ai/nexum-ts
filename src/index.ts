@@ -1,7 +1,11 @@
 import { config } from './config.js'
 import { migrate } from './db/migrate.js'
+import { createApp } from './server.js'
+import './routes/health.js'
 
 await migrate()
 
-// Server startup will be wired up in issue #36
-console.log(`Nexum starting on port ${config.PORT}`)
+const server = createApp()
+server.listen(config.PORT, () => {
+  console.log(`Nexum listening on port ${config.PORT}`)
+})
