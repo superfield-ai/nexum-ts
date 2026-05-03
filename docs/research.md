@@ -230,108 +230,105 @@ This reframes the staleness problem precisely: a frozen ONNX export can only rea
 
 The research areas are not fully independent, and their value is not equal. The goal is to answer the highest-uncertainty, highest-impact questions first so that negative results terminate expensive downstream work early rather than late. Each gate is the smallest experiment that resolves a binary decision with high confidence.
 
+### Sequencing Principle
+
+**Correctness before scalability.** The first questions are: does the system produce correct answers, and does typed-link provenance add measurable value over vanilla RAG? Scalability questions (does Postgres handle 5M blocks?) are irrelevant until correctness is established. An architecture that scales but gives wrong answers is not useful. An architecture that gives right answers at small scale can be scaled.
+
+Experiments are therefore ordered by what they tell us about *whether this works*, not *how fast it runs*.
+
 ### Decision Gates
 
-Five gates determine the shape of the program. Each gate produces a binary outcome that changes which subsequent work is staffed.
+Five gates determine the shape of the program. Each gate produces a binary outcome that changes which subsequent work is staffed. They are listed here in the order they should be run — correctness gates first.
 
-| Gate | Question | Hypothesis | Signal by | Stakes if NO |
+| Gate | Question | Type | Signal by | Stakes if NO |
 |---|---|---|---|---|
-| **G0** | Is the graph differentiable? | H7.1 spike | Week 2 | Area 7 reverts to distillation; Area 2 becomes primary training mechanism |
-| **G1** | Does Postgres scale to target corpus? | H1.1 | Week 4 | Graph DB migration required; blocks Areas 3, 5, 6 until resolved |
-| **G2** | Does provenance beat vanilla RAG visibly? | H4.4 wedge demo | Week 6 | Program narrows to pure systems research (Areas 1, 5, 6 only); curriculum and frozen-export shelved |
-| **G3** | Does typed-link structure carry independent gradient signal? | H7.2 | Week 10 | Link types useful for retrieval only, not gradient training; simplify link model |
-| **G4** | Is ONNX serialization lossless? | H7.3 spike | Week 10 | Frozen export requires distillation (lossy); changes product tier story |
+| **G2** | Does provenance beat vanilla RAG visibly? | Correctness | Week 2 | Program narrows to pure systems research; all ML/curriculum/export work shelved |
+| **G0** | Is the graph differentiable? | Research direction | Week 3 | Area 7 reverts to distillation; Area 2 becomes primary training mechanism |
+| **G1** | Does Postgres scale to target corpus? | Scalability | Week 6 | Graph DB migration required; blocks Area 1 full, Area 6 |
+| **G3** | Does typed-link structure carry independent gradient signal? | Research direction | Week 8 | Link types dropped from gradient axis; model reduces to untyped GNN |
+| **G4** | Is ONNX serialization lossless? | Research direction | Week 8 | Frozen export requires distillation (lossy); changes product tier story |
 
-G0 and G2 are the program's most load-bearing gates. G0 determines whether the graph is a differentiable model or a retrieval substrate; G2 determines whether the product story holds for buyers. Both must return positive before significant research investment continues beyond Phase 1.
-
----
-
-### Phase 0 — Core Thesis Spikes (Weeks 1–2)
-
-Run the two smallest experiments that resolve the highest-uncertainty questions. Both run in parallel; neither depends on the other.
-
-**Spike A — Differentiability (G0 / H7.1 kill criterion)**
-Implement a minimal typed-link message-passing forward pass on a synthetic 10K-block corpus. Use soft attention relaxation over neighbor edges (weighted by link confidence × type embedding). Run backpropagation. Pass criterion: loss decreases monotonically within 1K gradient steps. Time budget: 5 engineering days. If loss does not decrease — gradient vanishes, collapses, or oscillates — G0 fails immediately.
-
-**Spike B — Postgres scale floor (G1 / H1.1)**
-Build a 1M-block synthetic corpus in Postgres + pgvector. Measure P50/P99 query latency for all three query modes. Compare against a 5M-block corpus on the same schema. Pass criterion: P99 latency stays below 500ms at 5M blocks with the target hardware budget. Time budget: 3 engineering days.
-
-**G0 YES → Phase 1A (differentiable program)**
-**G0 NO → Phase 1B (retrieval-only program)**
+G2 is the most load-bearing gate and must run first. If provenance does not measurably improve answers at small scale, none of the scalability or ML work matters. G0 is the most load-bearing gate for the differentiable graph thesis and runs second, independently of G2.
 
 ---
 
-### Phase 1A — Differentiable Graph Program (Weeks 3–8, if G0 confirmed)
+### Phase 0 — Correctness (Weeks 1–2)
 
-**Week 3–4: ONNX losslessness spike (G4 / H7.3)**
-Train the differentiable graph model from Spike A on the 10K-block corpus. Export to ONNX. Run held-out eval on live graph and on ONNX Runtime. Measure accuracy delta. Pass criterion: < 1% delta on attribution F1. Time budget: 4 days. This resolves G4 early while the model is still small and fast to iterate.
+**Prerequisite:** the API server must be running with at minimum: `POST /corpora`, `POST /documents` (text/markdown), `POST /query` (semantic mode), and the embedding pipeline. All Phase 0 experiments run at small corpus scale — hundreds to thousands of blocks, not millions.
 
-**Week 3–6: Wedge demo (G2 / H4.4)**
-Build an end-to-end demo on one legal or medical partner corpus. Combine block-level provenance (H4.4), real-time ingest (H5.1/H5.2), and the typed-link retrieval forward pass (Area 3). Run head-to-head against vanilla RAG on the same corpus. Pass criterion: visibly better attribution accuracy on a held-out question set; at least two design partners engage within four weeks of demo. This is the program's product-market fit gate.
+**G2 — Wedge demo (H4.4)**
+The first experiment to run as soon as the API is up. Ingest a small legal corpus (50–100 CUAD contracts) into Nexum and into a vanilla LlamaIndex RAG instance using the same documents. Run 50 QA pairs from the CUAD evaluation set through both. Measure attribution F1: what fraction of cited source blocks actually contain the gold answer span? Pass criterion: Nexum attribution F1 > vanilla RAG by > 5 percentage points on the held-out set. Time budget: 1 week from API readiness. This is a correctness test, not a performance test — run it at whatever scale the API can handle.
 
-**Week 4–8: Storage benchmark (Area 1 full)**
-Run the full corpus scale experiment (1M / 5M / 20M / 100M blocks) across storage configurations. Results inform the Area 5 (update semantics) and Area 6 (GPU) experiments. Runs in parallel with the wedge demo — no gate dependency.
-
-**Week 6–10: Forward pass quality (G3 / H7.2)**
-Extend the differentiable model to a 100K-block legal corpus. Measure whether `contradicts` and `supports` edge weights develop distinct learned profiles (cosine distance between weight vectors of same-type vs. cross-type edges). Pass criterion: statistically significant separation at p < 0.05. If G3 fails, typed link types are dropped from the gradient training axis and the model reduces to standard GNN aggregation over untyped edges.
-
----
-
-### Phase 1B — Retrieval-Only Program (Weeks 3–8, if G0 fails)
-
-Area 2 (Training Curriculum) becomes the primary research direction. The graph is a retrieval and provenance substrate; training a model over it means constructing a curriculum and fine-tuning a separate student model.
-
-**Week 3–6: Curriculum construction (H2.1 spike)**
-Construct contrastive pairs from `contradicts` and `supports` links on a 10K-contract legal corpus. Fine-tune a base LM on three curricula: (a) flat random, (b) BFS structural walk, (c) typed contrastive pairs. Evaluate on clause extraction and contradiction detection. This replaces G0 as the primary gating experiment.
-
-**Week 6–10: Distillation pipeline**
-If H2.1 confirms signal, build the full curriculum → student model → GGUF export pipeline. Area 7 in this branch is distillation-based, not lossless serialization. The frozen artifact is competitive with the retrieval client but is not equivalent to it.
-
-The wedge demo (G2) still runs in Phase 1B — provenance and retrieval quality do not depend on differentiability.
+**Area 5 partial visibility (H5.2, H5.4) — parallel with G2**
+Two sub-experiments that test live-ingest correctness at small scale:
+- H5.2: does serving a block before its AI links are classified degrade answer quality by more than 5%? (embed-only vs. fully-linked)
+- H5.4: does a minor content edit (< 5% token change) require re-embedding, or is the existing embedding still retrieval-accurate? Run on 10K blocks with synthetic edits.
+Neither requires large corpora or performance measurement.
 
 ---
 
-### Phase 2 — Convergence (Weeks 8–14, both branches)
+### Phase 1 — Quality Measurement (Weeks 2–4)
 
-At this point G1, G2, G3, G4 are resolved. The remaining work fills in the program:
+**Area 4 — Provenance and compositional reasoning (H4.1, H4.2, H4.4)**
+After G2 confirms provenance adds value, measure precisely how much and under what conditions. Attribution audit: run 100 CUAD QA pairs, expert-verify the cited blocks (automated against gold spans). Multi-hop: construct 2/3/4/5-hop questions from cross-document CUAD relationships; measure whether Nexum's graph traversal closes the gap that vanilla RAG cannot. Pass: false attribution rate < 5% (H4.4) and Nexum outperforms vanilla at ≥ 3-hop questions (H4.2).
 
-- **Area 3 (Retrieval-Augmented Inference)** — latency benchmark, cache tier experiment, sparse attention ablation. Depends on Area 1 storage decisions (G1) and the forward pass definition confirmed in Phase 1.
-- **Area 4 (Provenance & Compositional Reasoning)** — attribution audit, multi-hop compositional reasoning benchmark. Depends on Phase 1 wedge demo infrastructure.
-- **Area 5 (Update Semantics)** — insertion-to-retrieval latency breakdown, partial-visibility eval, version atomicity test. Runs on the storage stack confirmed in Phase 1.
+**Area 3 — Retrieval quality at small scale (H3.1, H3.3)**
+At the same small scale as G2: does typed-link graph traversal produce better answers than flat ANN retrieval on the same corpus? Does adding graph expansion to a semantic query improve multi-hop answer quality? Use an LM-as-judge rubric on 50 questions. This answers the question "is the graph traversal doing useful work?" before we ask "is it fast?"
+
+**G0 — Differentiability spike (H7.1) — parallel with Area 3**
+Independent of the above. Implement the minimal typed-link message-passing forward pass on a 10K-block synthetic corpus. Run backpropagation. Pass criterion: loss decreases monotonically within 1K gradient steps. The outcome determines whether Areas 2 and 7 proceed on the differentiable or distillation path.
 
 ---
 
-### Phase 3 — Optimization (Weeks 12–20)
+### Phase 2 — Scalability (Weeks 4–8, after Phase 0 passes)
 
-- **Area 6 (GPU Acceleration)** — depends on Area 5 latency baselines identifying the binding constraint. HNSW vs. embedding vs. aggregation as the bottleneck determines which GPU experiment is run first.
-- **Area 7 (Full run)** — if G0 and G4 confirmed (lossless path): staleness curve, throughput comparison, ONNX Runtime optimization. If G0 failed (distillation path): staleness curve, format comparison bake-off.
-- **Area 2 (Training Curriculum)** — if G0 confirmed (secondary role): run H2.1–H2.4 experiments to characterize the signal that typed-link curriculum provides on top of the gradient-trained graph. Not required for the core product; characterizes the offline fine-tuning use case.
+Only run after G2 has confirmed correctness. Scalability experiments are meaningless if the system does not first produce correct answers.
+
+**G1 — Postgres scale floor (H1.1)**
+Build a 5M-block synthetic corpus; measure P50/P99 for all three query modes. Pass criterion: P99 < 500ms. Time budget: 3 days. This is a measurement, not a research experiment — it either passes or triggers a storage migration decision.
+
+**Area 1 — Storage architecture fitness (H1.1, H1.2)**
+If G1 passes, extend to 20M / 100M blocks. Compare Postgres vs. Kuzu for graph traversal. Run embedding dimension ablation (512 / 768 / 384 with our local model). These results inform Area 6 (GPU) and confirm the storage architecture for the full program.
+
+**Area 5 — Full update semantics (H5.1, H5.3, H5.5)**
+Now that the correctness sub-experiments (H5.2, H5.4) are done, measure the full latency picture: insertion-to-retrieval pipeline breakdown, version atomicity window, high-ingest contention. These results identify the binding constraint for Area 6.
+
+---
+
+### Phase 3 — Speculative (Weeks 8–16, gated on G0)
+
+**If G0 passed:**
+- **G4 — ONNX losslessness spike** (H7.3): export the trained graph to ONNX; verify < 1% accuracy delta
+- **G3 — Typed-link gradient signal** (H7.2): measure whether edge types develop distinct learned profiles
+- **Area 7 — Differentiable graph full run**: train at 100K-block scale; staleness curve; throughput comparison
+- **Area 2 — Training curriculum** (H2.1–H2.4): characterize the signal that typed-link curriculum provides
+
+**If G0 failed:**
+- **Area 2 — Training curriculum** (primary path): contrastive pairs from `contradicts`/`supports` links → fine-tune a base LM → evaluate improvement over flat-corpus training
+- **Area 7 — Distillation path**: graph → BFS curriculum → student model → GGUF export
+
+**Area 6 — GPU acceleration** (depends on Area 5 identifying the binding constraint): only run after Area 5 latency baselines show that GPU would actually help.
 
 ---
 
 ### Dependency Tree
 
 ```
-Phase 0: G0 spike ──────────────── G1 spike (Postgres scale)
-           │
-     [G0 YES]           [G0 NO]
-           │                  │
-    Phase 1A              Phase 1B
-    (differentiable)      (retrieval-only)
-    ├── G4 spike          └── H2.1 curriculum spike
-    ├── G2 wedge demo         └── distillation pipeline
-    ├── Area 1 full
-    └── G3 (typed signal)
-           │
-    Phase 2 (both branches converge here)
-    ├── Area 3 (Retrieval-Augmented Inference)
-    ├── Area 4 (Provenance & Compositional Reasoning)
-    └── Area 5 (Update Semantics)
-           │
-    Phase 3 (optimization)
-    ├── Area 6 (GPU Acceleration)      ← bottleneck identified by Area 5
-    ├── Area 7 (full run)              ← lossless (G0+G4 YES) or distillation (G0 NO)
-    └── Area 2 (Training Curriculum)   ← secondary if G0 YES; primary if G0 NO
+Phase 0: G2 wedge demo ───── Area 5 (H5.2, H5.4 only)
+              │
+         [passes?]
+              │
+Phase 1:  Area 4 ──── Area 3 ──── G0 (parallel, independent)
+              │                        │
+         [confirmed]             [G0 YES / NO]
+              │                        │
+Phase 2:  G1 scale ── Area 1 ──── Area 5 full
+              │
+         [passes?]
+              │
+Phase 3:  [G0 YES] G4 ── G3 ── Area 7 ── Area 2
+          [G0 NO]  Area 2 (primary) ── Area 7 (distillation)
+          Area 6 (after Area 5 identifies bottleneck)
 ```
 
 ---
@@ -340,9 +337,9 @@ Phase 0: G0 spike ──────────────── G1 spike (Pos
 
 The program terminates or narrows at two hard gates:
 
-1. **G2 fails (wedge demo):** If block-level provenance does not produce visibly better answers than vanilla RAG on a real partner corpus by Week 6, and no design partners engage, the program narrows immediately to pure systems research — Areas 1, 5, 6 only. All curriculum, retrieval-inference, and frozen-export work is shelved until a customer asks for it. No further staffing on Areas 2, 3, 4, 7.
+1. **G2 fails (wedge demo, Phase 0):** If typed-link provenance does not produce measurably better attribution than vanilla RAG on a small real corpus within two weeks of API readiness, the program narrows immediately to pure systems research — Areas 1, 5, 6 only. All curriculum, retrieval-inference, and frozen-export work is shelved. No further staffing on Areas 2, 3, 4, 7. This is the earliest possible signal and the cheapest possible kill.
 
-2. **G0 and H2.1 both fail:** If the graph is not differentiable (G0) and typed-link contrastive pairs do not improve fine-tuning (H2.1), the typed link layer has no training signal — only retrieval value. The program narrows to: block-level provenance + real-time ingest + attribution (Areas 1, 3, 4, 5) as a pure retrieval product. The research thesis is falsified; this is a valid outcome.
+2. **G0 and H2.1 both fail:** If the graph is not differentiable (G0) and typed-link contrastive pairs do not improve fine-tuning over random sampling (H2.1), the typed link layer has no training signal — only retrieval value. The program narrows to: block-level provenance + real-time ingest + attribution as a pure retrieval product. The research thesis is falsified; this is a valid outcome.
 
 ---
 

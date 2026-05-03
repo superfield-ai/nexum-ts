@@ -12,20 +12,65 @@ This document is the build plan for the Nexum API server: the minimum viable sys
 
 Engineering.md specifies Rust + tokio for the ingestion pipeline. The README specifies Node.js ≥ 20. These are not contradictory: the API server and ingestion pipeline can be TypeScript now, with the CPU-bound parsing stages migrated to Rust later as the performance envelope tightens.
 
-**Chosen stack (Phase 1 / this plan):**
+**Dependency principle:** only pull in a third-party package when the equivalent built-in implementation would be genuinely complex (>200 lines, meaningful correctness risk, or domain-specific format knowledge). Framework dependencies that wrap simple operations — HTTP routing, config parsing, job queues, API clients — are replaced with direct Node.js equivalents.
 
-| Component | Choice | Rationale |
+**No paid API dependencies.** OpenAI and Anthropic are excluded: they are metered, non-deterministic across runs, require network access, and introduce reliability risk for experiments that need reproducible results.
+
+**Language policy: TypeScript only in the runtime.** Python is permitted only in `experiments/` for evaluation harnesses with unavoidable Python-ecosystem dependencies (torch, beir, ogb, etc.). No Python in the API server, ingestion pipeline, or any code path that runs when a request is served. See `docs/engineering.md` for the full rationale.
+
+**Actual runtime dependencies (3 packages):**
+
+| Package | Why it stays |
+|---|---|
+| `pg` | PostgreSQL wire protocol; no realistic built-in alternative |
+| `mammoth` | DOCX is ZIP + namespaced XML; correct heading/paragraph extraction is ~500 LOC |
+| `@xenova/transformers` | ONNX Runtime + model hub client; produces local CPU embeddings; not replicable in ~50 LOC |
+
+**Everything else is Node built-ins:**
+
+| Concern | Implementation | LOC |
 |---|---|---|
-| HTTP server | Fastify + TypeScript | Schema validation built-in, TypeScript-native, 2× Express throughput |
-| DB client | `pg` + `pgvector` | Direct queries, no ORM — keeps SQL explicit and auditable |
-| Embedding | `openai` SDK | `text-embedding-3-small`, batched, rate-limited |
-| AI linking | `@anthropic-ai/sdk` | Claude Haiku for link classification |
-| PDF parsing | `pdftotext` (poppler CLI) | Already in prerequisites |
-| DOCX parsing | `mammoth` | Paragraph/heading extraction, native Node |
-| Markdown | `unified` + `remark-parse` | AST-based, heading/paragraph/list boundaries |
-| Job queue | `pg-boss` | Postgres-backed async queue — no Redis, stays single-store |
-| Testing | `vitest` + `testcontainers` | Integration tests against real Postgres in Docker |
-| Dev setup | `docker-compose` | Local Postgres 16 + pgvector, no install required |
+| HTTP server + router | `node:http` + path/method dispatch table | ~40 |
+| JSON body parsing | `async function readBody(req)` | ~10 |
+| Environment config | Read `.env` with `node:fs`, `process.env` | ~10 |
+| Job queue | `SELECT ... FOR UPDATE SKIP LOCKED` polling loop | ~60 |
+| Markdown parsing | Line-by-line heading/paragraph state machine | ~30 |
+| pgvector encoding | `[${vec.join(',')}]` string; `JSON.parse` on read | ~5 |
+| SHA-256 content hash | `node:crypto` `createHash('sha256')` | ~3 |
+| UUID generation | `node:crypto` `randomUUID()` | ~1 |
+
+**Embeddings — `@xenova/transformers` (local ONNX, in-process):**
+`@xenova/transformers` runs ONNX models entirely within the Node.js process using ONNX Runtime. No API key, no network call, no subprocess, no Python. The model (`Xenova/all-MiniLM-L6-v2`, 384 dims, ~25 MB) downloads from Hugging Face on first run and is cached locally. Subsequent loads are instant. Output is deterministic across runs — critical for reproducible experiment results.
+
+```typescript
+import { pipeline } from '@xenova/transformers'
+const embedder = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2')
+const output = await embedder(texts, { pooling: 'mean', normalize: true })
+// output.data is a Float32Array of shape [n_texts, 384]
+```
+
+This is the same model family the lab-bench experiments use (`all-MiniLM-L6-v2` via Python `sentence-transformers`), ensuring consistency between the API embeddings and the evaluation harness embeddings.
+
+**AI linker — heuristics, no model:**
+The AI linker is the third link layer (`layer: 'ai'`). For MVP, it does not need a language model. The research experiments (Area 2, Area 7) test whether better classification matters — so the MVP just needs a reasonable baseline. A cosine similarity threshold plus negation/support keyword detection produces useful `contradicts` / `supports` / `elaborates` / `none` classifications without any model.
+
+```
+contradicts:    sim > 0.7 AND block_b contains {not, however, contrary, but, instead, unlike}
+supports:       sim > 0.7 AND block_b contains {similarly, also, furthermore, consistent, confirms}
+elaborates:     sim > 0.7 AND block_b contains {specifically, for example, in particular, namely}
+overrides:      sim > 0.7 AND block_b contains {supersedes, replaces, amends, notwithstanding}
+is-exception-to: sim > 0.7 AND block_b contains {except, unless, provided that, subject to}
+none:           sim ≤ 0.7 OR no keyword match
+```
+
+This is deterministic, zero-cost, and produces the typed link structure the experiments require. A better model can be swapped in later without API changes.
+
+**Embedding dimension: 384 (configurable)**
+`all-MiniLM-L6-v2` outputs 384 dimensions. The schema uses `vector(384)` by default. Override with `EMBEDDING_DIM` env var for future model changes. All three query modes work the same regardless of dimension.
+
+**`package.json` devDependencies only:**
+- `typescript`, `tsx`, `@types/node`, `@types/pg` — compile-time tooling
+- `node:test` (built-in) for unit tests; `testcontainers` for integration tests against real Postgres
 
 ---
 

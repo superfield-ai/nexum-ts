@@ -342,13 +342,32 @@ The linker runs as an async Rust process calling the Anthropic API, writing resu
 | Database | PostgreSQL 16 | Single store for documents, vectors, and graph |
 | Vector index | pgvector HNSW | Sub-ms ANN search, native Postgres |
 | Full-text | tsvector (built-in) | No additional service |
-| Ingestion | Rust + tokio | Async I/O, rayon for CPU parsing, backpressure via bounded channels |
-| PDF parsing | pdftotext (poppler) | More reliable than pure-Rust PDF parsers for complex legal layouts |
-| DOCX parsing | docx-rs | Native Rust |
-| Markdown | pulldown-cmark | Native Rust |
-| ORM / DB driver | sqlx | Async, compile-time query checking, COPY protocol support |
-| Embedding API | OpenAI / self-hosted | Configurable; local model avoids rate limits |
-| AI linking | Anthropic Claude API | Typed relationship extraction via structured output |
+| API server | TypeScript / Node.js ≥ 20 | `node:http` directly — no HTTP framework |
+| PDF parsing | pdftotext (poppler) | Reliable for complex legal layouts; CLI already a prerequisite |
+| DOCX parsing | `mammoth` (npm) | DOCX is ZIP + namespaced XML; correct extraction is ~500 LOC |
+| Markdown | Line-by-line state machine | ~30 LOC; no parser library needed |
+| DB driver | `pg` (npm) | PostgreSQL wire protocol; no ORM |
+| Embeddings | `@xenova/transformers` — `all-MiniLM-L6-v2` | Local ONNX inference, CPU-bound, deterministic, 384-dim |
+| AI linking | Cosine similarity + keyword heuristics | Deterministic, zero-cost; model can be swapped in later |
+| Job queue | `SELECT ... FOR UPDATE SKIP LOCKED` | Postgres-native; no separate queue service |
+
+### Language Policy
+
+**TypeScript (Node.js) is the language for all runtime code** — the API server, ingestion pipeline, query layer, background workers, and linkers.
+
+**Python is permitted only for benchmarking tools with unavoidable Python-ecosystem dependencies.** Specifically: evaluation harnesses in `experiments/` that require `torch`, `torch-geometric`, `beir`, `mteb`, `ogb`, `datasets`, or `sentence-transformers`. These tools exist to *measure* Nexum from the outside; they are not part of Nexum's runtime.
+
+**Python is prohibited in:**
+- The API server (`src/`)
+- Ingestion workers
+- Any code that runs as part of serving a request or background job
+
+**The boundary is clear:** if it runs when a user or experiment hits the Nexum API, it is TypeScript. If it runs as an external evaluation harness that treats Nexum as a black box, Python is acceptable.
+
+This rule exists because:
+1. Mixed-language runtime boundaries add operational complexity (two process managers, two dependency trees, two failure modes)
+2. Python subprocesses from Node introduce latency, startup cost, and serialization overhead that belong in benchmarks, not production paths
+3. All embedding and link classification can be done in-process in TypeScript using ONNX Runtime (`@xenova/transformers`) without paid APIs or network calls
 
 ---
 
