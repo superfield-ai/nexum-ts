@@ -4,6 +4,7 @@ import { createApp } from './server.js'
 import './routes/health.js'
 import './routes/corpora.js'
 import './routes/documents.js'
+import './routes/entities.js'
 
 await migrate()
 
