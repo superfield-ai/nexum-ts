@@ -2,6 +2,7 @@ import { config } from './config.js'
 import { migrate } from './db/migrate.js'
 import { createApp } from './server.js'
 import './routes/health.js'
+import './routes/corpora.js'
 
 await migrate()
 
