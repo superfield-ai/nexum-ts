@@ -3,6 +3,10 @@ import { config } from '../config.js'
 
 let pool: pg.Pool | null = null
 
+export function resetPool(): void {
+  pool = null
+}
+
 export async function getPool(): Promise<pg.Pool> {
   if (!pool) {
     pool = new pg.Pool({ connectionString: config.DATABASE_URL })
