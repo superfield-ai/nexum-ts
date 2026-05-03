@@ -1,0 +1,31 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Nexum API", "version": "0.1.0", "description": "Universal document intelligence platform" },
+  "servers": [{ "url": "http://localhost:3000" }],
+  "paths": {
+    "/health": {
+      "get": { "summary": "Health check", "responses": { "200": { "description": "OK" } } }
+    },
+    "/corpora": {
+      "post": { "summary": "Create corpus", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "description": { "type": "string" } } } } } }, "responses": { "201": { "description": "Created" } } }
+    },
+    "/corpora/{id}": {
+      "get": { "summary": "Get corpus", "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }], "responses": { "200": { "description": "OK" }, "404": { "description": "Not found" } } }
+    },
+    "/documents": {
+      "post": { "summary": "Ingest document", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["corpus_id", "title", "content", "format"], "properties": { "corpus_id": { "type": "string" }, "title": { "type": "string" }, "content": { "type": "string" }, "format": { "type": "string", "enum": ["text", "markdown", "pdf", "docx"] } } } } } }, "responses": { "202": { "description": "Accepted" } } }
+    },
+    "/query": {
+      "post": { "summary": "Query documents", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["corpus_id", "mode"], "properties": { "corpus_id": { "type": "string" }, "query": { "type": "string" }, "mode": { "type": "string", "enum": ["semantic", "fulltext", "graph", "hybrid"] }, "limit": { "type": "integer", "default": 10 } } } } } }, "responses": { "200": { "description": "Results" } } }
+    },
+    "/blocks/embed": {
+      "post": { "summary": "Embed text", "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["text"], "properties": { "text": { "type": "string" } } } } } }, "responses": { "200": { "description": "Embedding vector" } } }
+    },
+    "/entities": {
+      "post": { "summary": "Create entity (user/agent)", "responses": { "201": { "description": "Created with api_key" } } }
+    },
+    "/openapi.json": {
+      "get": { "summary": "OpenAPI spec", "responses": { "200": { "description": "Spec" } } }
+    }
+  }
+}
