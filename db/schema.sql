@@ -119,3 +119,21 @@ CREATE INDEX IF NOT EXISTS links_src_idx ON links (src);
 CREATE INDEX IF NOT EXISTS links_dst_idx ON links (dst);
 CREATE INDEX IF NOT EXISTS links_src_layer_idx ON links (src, layer);
 CREATE INDEX IF NOT EXISTS links_dst_layer_idx ON links (dst, layer);
+
+-- Entities: users and agents that can authenticate via API key
+CREATE TABLE IF NOT EXISTS entities (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    type         TEXT NOT NULL CHECK (type IN ('user', 'agent')),
+    name         TEXT NOT NULL,
+    api_key_hash TEXT,
+    scopes       TEXT[] DEFAULT '{}',
+    created_at   TIMESTAMPTZ DEFAULT now()
+);
+
+-- Corpus access: maps entities to corpora with specific scopes
+CREATE TABLE IF NOT EXISTS corpus_access (
+    entity_id  UUID NOT NULL REFERENCES entities(id),
+    corpus_id  UUID NOT NULL REFERENCES corpora(id),
+    scopes     TEXT[] NOT NULL DEFAULT '{}',
+    PRIMARY KEY (entity_id, corpus_id)
+);
