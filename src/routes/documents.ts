@@ -2,6 +2,7 @@ import { route, send, readBody } from '../server.js'
 import { queryOne } from '../db/queries.js'
 import { parseText } from '../ingest/parse-text.js'
 import { parseMarkdown } from '../ingest/parse-markdown.js'
+import { parsePdf } from '../ingest/parse-pdf.js'
 import { contentHash } from '../ingest/dedup.js'
 import type { ParsedBlock } from '../ingest/parse-text.js'
 
@@ -12,16 +13,22 @@ route('POST', '/documents', async (req, res) => {
   if (!body?.corpus_id) return send(res, 400, { error: 'corpus_id is required' })
   if (!body?.title) return send(res, 400, { error: 'title is required' })
   if (!body?.content) return send(res, 400, { error: 'content is required' })
-  if (!['text', 'markdown'].includes(body?.format)) return send(res, 400, { error: 'format must be text or markdown' })
+  if (!['text', 'markdown', 'pdf'].includes(body?.format)) return send(res, 400, { error: 'format must be text, markdown, or pdf' })
 
   // Check corpus exists
   const corpus = await queryOne('SELECT id FROM corpora WHERE id = $1', [body.corpus_id])
   if (!corpus) return send(res, 404, { error: 'corpus not found' })
 
   // Parse blocks
-  const parsedBlocks: ParsedBlock[] = body.format === 'markdown'
-    ? parseMarkdown(body.content)
-    : parseText(body.content)
+  let parsedBlocks: ParsedBlock[]
+  if (body.format === 'pdf') {
+    const pdfBuffer = Buffer.from(body.content, 'base64')
+    parsedBlocks = await parsePdf(pdfBuffer)
+  } else if (body.format === 'markdown') {
+    parsedBlocks = parseMarkdown(body.content)
+  } else {
+    parsedBlocks = parseText(body.content)
+  }
 
   // Hash all blocks
   const hashes = parsedBlocks.map(b => contentHash(b.content))
@@ -38,7 +45,7 @@ route('POST', '/documents', async (req, res) => {
     const docRow = await client.query(
       `INSERT INTO documents (title, source_format, corpus_id, external_id, meta)
        VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [body.title, body.format === 'text' ? null : 'markdown', body.corpus_id, body.external_id ?? null, body.meta ?? null]
+      [body.title, body.format === 'text' ? null : body.format, body.corpus_id, body.external_id ?? null, body.meta ?? null]
     )
     const docId: string = docRow.rows[0].id
 
