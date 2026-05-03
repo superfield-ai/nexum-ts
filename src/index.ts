@@ -6,6 +6,7 @@ import './routes/corpora.js'
 import './routes/documents.js'
 import './routes/entities.js'
 import './routes/embed.js'
+import './routes/query.js'
 
 await migrate()
 
