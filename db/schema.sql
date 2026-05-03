@@ -137,3 +137,15 @@ CREATE TABLE IF NOT EXISTS corpus_access (
     scopes     TEXT[] NOT NULL DEFAULT '{}',
     PRIMARY KEY (entity_id, corpus_id)
 );
+
+CREATE TABLE IF NOT EXISTS job_queue (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_type    TEXT NOT NULL,
+    payload     JSONB NOT NULL,
+    status      TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'done', 'failed')),
+    attempts    INTEGER DEFAULT 0,
+    created_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS job_queue_pending_idx ON job_queue (job_type, status, created_at)
+    WHERE status = 'pending';
