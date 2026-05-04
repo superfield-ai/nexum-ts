@@ -53,7 +53,14 @@ def ensure_schema(conn, schema_sql_path: str = _DEFAULT_SCHEMA_PATH) -> None:
     with conn.cursor() as cur:
         for stmt in statements:
             stmt = stmt.strip()
-            if not stmt or stmt.startswith("--"):
+            if not stmt:
+                continue
+            # Strip leading comment lines so a statement like
+            # "-- comment\nCREATE TABLE..." is not skipped.
+            sql_only = "\n".join(
+                line for line in stmt.splitlines() if not line.strip().startswith("--")
+            ).strip()
+            if not sql_only:
                 continue
             cur.execute(stmt)
     conn.commit()
