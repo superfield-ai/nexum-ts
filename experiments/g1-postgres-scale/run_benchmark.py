@@ -9,6 +9,12 @@ Usage::
         --n-queries 100 \\
         --output results/g1_result.json
 
+    # Skip ingest — restore from local cache instead (fast path)
+    python run_benchmark.py \\
+        --db-url postgresql://nexum:nexum@localhost:5433/nexum_bench \\
+        --from-cache --scales 1m \\
+        --n-queries 100
+
 Runs ingestion + benchmark at each scale.
 Writes a structured results JSON and prints pass/fail for G1.
 Exit code 0 if P99 < 500 ms at all tested scales, else 1.
@@ -30,6 +36,7 @@ from ingest import generate_and_ingest, DOMAIN_MIXES
 from benchmark import run_latency_benchmark
 from schema import ensure_schema
 from sizing_memo import compute_sizing_memo
+from db_cache import cmd_restore, CACHE_DIR, _dump_path
 
 
 # ---------------------------------------------------------------------------
@@ -128,10 +135,51 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip schema creation (assumes schema already applied)",
     )
+    parser.add_argument(
+        "--from-cache",
+        action="store_true",
+        help=(
+            "Restore database from ~/.cache/nexum/ dump instead of re-ingesting. "
+            "Requires a prior 'python db_cache.py dump' run. "
+            "Skips ingest for the first scale only (assumes single-scale cache)."
+        ),
+    )
+    parser.add_argument(
+        "--docker-container",
+        default="nexum-bench",
+        help="Docker container name for cache restore (default: nexum-bench)",
+    )
     args = parser.parse_args(argv)
 
     scales = [_parse_scale(s) for s in args.scales]
     domain_mix = DOMAIN_MIXES[args.domain_mix]
+
+    # ── cache restore path ────────────────────────────────────────────────────
+    if args.from_cache:
+        scale_label = args.scales[0].lower().rstrip("m") + "m" if args.scales else "1m"
+        dim = args.embedding_dim
+        dump = _dump_path(scale_label, dim)
+        if not dump.exists():
+            print(
+                f"[G1] ERROR — --from-cache requested but no dump found at {dump}\n"
+                f"[G1] Run: python db_cache.py dump --scale {scale_label} --dim {dim}",
+                file=sys.stderr,
+            )
+            return 1
+
+        import types
+        restore_args = types.SimpleNamespace(
+            docker_container=args.docker_container,
+            db_url=args.db_url,
+            scale=scale_label,
+            dim=dim,
+            jobs=4,
+        )
+        print(f"[G1] --from-cache: restoring from {dump} …")
+        rc = cmd_restore(restore_args)
+        if rc != 0:
+            return rc
+        print("[G1] Cache restore complete — skipping ingest for first scale.")
 
     print(f"[G1] Connecting to {args.db_url!r} …")
     try:
@@ -140,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[G1] ERROR — cannot connect: {exc}", file=sys.stderr)
         return 1
 
-    if not args.skip_schema:
+    if not args.skip_schema and not args.from_cache:
         print("[G1] Applying schema …")
         try:
             ensure_schema(conn)
@@ -151,31 +199,53 @@ def main(argv: list[str] | None = None) -> int:
 
     all_results: list[dict[str, Any]] = []
     overall_pass = True
+    cache_used_for: set[str] = set()
 
-    for n_blocks in scales:
+    for scale_idx, n_blocks in enumerate(scales):
         scale_label = f"{n_blocks // 1_000_000}M" if n_blocks >= 1_000_000 else str(n_blocks)
         print(f"\n[G1] === Scale: {scale_label} blocks ===")
 
-        print(f"[G1] Truncating existing data …")
-        _truncate_tables(conn)
+        use_cache = args.from_cache and scale_idx == 0
+        if use_cache:
+            # Data already restored — measure what's there without truncating/re-ingesting.
+            print(f"[G1] Using cached data (skipping truncate + ingest) …")
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM blocks")
+                cached_n = cur.fetchone()[0]
+                cur.execute("SELECT pg_total_relation_size('blocks') + pg_total_relation_size('links')")
+                cached_storage = cur.fetchone()[0]
+            ingest_stats = {
+                "n_blocks": cached_n,
+                "n_documents": None,
+                "n_links": None,
+                "embedding_dim": args.embedding_dim,
+                "storage_bytes": cached_storage,
+                "embedding_storage_bytes": cached_n * args.embedding_dim * 4,
+                "ingest_time_seconds": 0.0,
+                "source": "cache",
+            }
+            cache_used_for.add(scale_label)
+            print(f"[G1] Cached data: {cached_n:,} blocks, {cached_storage / 1e9:.2f} GB")
+        else:
+            print(f"[G1] Truncating existing data …")
+            _truncate_tables(conn)
 
-        print(f"[G1] Ingesting {n_blocks:,} blocks (domain_mix={args.domain_mix}) …")
-        t_ingest = time.perf_counter()
-        ingest_stats = generate_and_ingest(
-            conn=conn,
-            n_blocks=n_blocks,
-            domain_mix=domain_mix,
-            embedding_dim=args.embedding_dim,
-            seed=args.seed,
-            batch_size=args.batch_size,
-        )
-        print(
-            f"[G1] Ingest done in {ingest_stats['ingest_time_seconds']:.1f}s — "
-            f"{ingest_stats['n_blocks']:,} blocks, "
-            f"{ingest_stats['n_links']:,} links, "
-            f"{ingest_stats['storage_bytes'] / 1e9:.2f} GB total, "
-            f"{ingest_stats['embedding_storage_bytes'] / 1e9:.2f} GB embeddings"
-        )
+            print(f"[G1] Ingesting {n_blocks:,} blocks (domain_mix={args.domain_mix}) …")
+            ingest_stats = generate_and_ingest(
+                conn=conn,
+                n_blocks=n_blocks,
+                domain_mix=domain_mix,
+                embedding_dim=args.embedding_dim,
+                seed=args.seed,
+                batch_size=args.batch_size,
+            )
+            print(
+                f"[G1] Ingest done in {ingest_stats['ingest_time_seconds']:.1f}s — "
+                f"{ingest_stats['n_blocks']:,} blocks, "
+                f"{ingest_stats['n_links']:,} links, "
+                f"{ingest_stats['storage_bytes'] / 1e9:.2f} GB total, "
+                f"{ingest_stats['embedding_storage_bytes'] / 1e9:.2f} GB embeddings"
+            )
 
         print(f"[G1] Running latency benchmark ({args.n_queries} queries/mode) …")
         bench = run_latency_benchmark(

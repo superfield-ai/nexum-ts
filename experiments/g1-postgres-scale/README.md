@@ -143,6 +143,63 @@ after each run.
 
 ---
 
+## G1-OPT-1: Diagnosing and Fixing HNSW Latency
+
+The G1 spike (2026-05-04) measured semantic ANN P99=2424ms at 1M blocks with Docker defaults
+(`shared_buffers=128MB`). The G1-OPT-1 issue tracks diagnosis and optimization.
+
+### Step 1+2 — Diagnose the bottleneck
+
+```bash
+python diagnose.py --db-url postgresql://localhost/nexum_bench
+```
+
+Runs `EXPLAIN (ANALYZE, BUFFERS)` and checks HNSW index size vs `shared_buffers`.
+Outputs a verdict: **MEMORY** (cache-miss) or **CPU/DOCKER** (index cached but slow).
+
+### Step 3 — Optimize for low memory (if memory is culprit)
+
+```bash
+# Test all three optimization strategies
+python optimize.py --db-url postgresql://localhost/nexum_bench
+
+# Or test individually
+python optimize.py --db-url postgresql://localhost/nexum_bench --opts halfvec
+python optimize.py --db-url postgresql://localhost/nexum_bench --opts m8
+python optimize.py --db-url postgresql://localhost/nexum_bench --opts ivfflat
+```
+
+Each optimization rebuilds the index, measures P50/P99 latency and recall@10 vs brute-force.
+Pass criterion: P99 < 200ms **and** recall@10 ≥ 0.90.
+
+### Step 5 — ef_search sweep (after winning index is chosen)
+
+```bash
+python ef_search_sweep.py --db-url postgresql://localhost/nexum_bench
+```
+
+Sweeps `hnsw.ef_search` over [20, 40, 80, 200] and prints a latency/recall table.
+Identifies the knee: lowest ef_search meeting both P99 and recall criteria.
+
+### Recommended Postgres config
+
+See `postgres.conf` for the full recommended configuration. Key settings:
+
+```
+shared_buffers = 1GB       # covers halfvec HNSW index for 1M blocks
+work_mem = 256MB            # ANN queries need more working memory than default 4MB
+hnsw.ef_search = 80        # knee value (update after ef_search_sweep.py run)
+```
+
+Apply to a running Postgres instance:
+```sql
+ALTER SYSTEM SET shared_buffers = '1GB';
+ALTER SYSTEM SET work_mem = '256MB';
+SELECT pg_reload_conf();
+```
+
+---
+
 ## Interpreting Results
 
 | Result | Meaning |
