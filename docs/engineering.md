@@ -376,3 +376,46 @@ This rule exists because:
 - At legal-corpus scale (< 10M blocks), PostgreSQL handles all three query modes without a dedicated graph DB.
 - Recursive CTE traversal degrades past 5–6 hops on dense graphs. For deeper traversal, Apache AGE (adds Cypher to Postgres) or an external graph DB (Kuzu) can be introduced later without changing the block/link schema.
 - Embedding and AI linking are the pipeline bottlenecks. Both are horizontally scalable by running multiple ingestion worker processes against the same database, coordinated via `documents.status` row locking (`SELECT ... FOR UPDATE SKIP LOCKED`).
+
+---
+
+## Phase-1 Scout Seams (issue #78)
+
+The phase-1 dev-scout pre-stubs three surfaces that downstream phase-1 issues
+share. Nothing here implements feature behaviour; each seam exists so two
+issues can develop in parallel against a fixed contract. Cross-references in
+parentheses point to the implementation issues.
+
+### 1. AGE migration shim (#75 owns the implementation; #6 consumes it)
+
+- `docker-compose.yml` runs a second Postgres instance, `postgres-age`, on
+  port 5433 using `apache/age:PG16_latest`. The primary `postgres` service
+  (pgvector) is unchanged.
+- `db/migrations/0001_age_shim.sql` is mounted into
+  `/docker-entrypoint-initdb.d` of `postgres-age` and creates the AGE
+  extension, a graph called `nexum_links`, and stub `Block` / `LINK` labels.
+  It is guarded by `pg_available_extensions` so it is safe to run against any
+  Postgres.
+- `db/schema.sql` adds `links.edge_embedding vector(384)` (nullable, no
+  default). No code reads or writes it yet; #75 will populate it in the new
+  edge-embedding ingest stage.
+
+### 2. QA evaluation harness (#9 / #11)
+
+- `src/eval/harness.ts` exports `QAExample`, `QAPrediction`, `QAScore`,
+  `QAReport`, `QAMode`, `QAScorer`, `NullQAScorer`, and `aggregate`.
+- `NullQAScorer` returns null for every dimension; #11 ships the real
+  exact-match, F1, and citation-overlap scorers behind the same interface.
+- `aggregate()` produces the report shape consumed by
+  `experiments/_lib/results_writer.py`.
+
+### 3. Per-stage ingest timing (#12 / #75)
+
+- `src/ingest/timing.ts` exports a `timeStage(stage, ctx, fn)` wrapper that
+  emits one JSON line per stage to stdout under the key
+  `nexum_ingest_stage`. The default sink is swappable via `setStageSink`.
+- The `IngestStage` union enumerates canonical stage names, including the
+  not-yet-implemented `edge_embed` stage that #75 will populate.
+- `src/routes/documents.ts` wraps the parse and hash stages today; #12 will
+  extend coverage to embed / link / version stages without changing the call
+  site contract.
