@@ -30,6 +30,7 @@ from ingest import generate_and_ingest, DOMAIN_MIXES
 from benchmark import run_latency_benchmark
 from schema import ensure_schema
 from sizing_memo import compute_sizing_memo
+from traversal_diagnostics import run_full_diagnosis
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +129,25 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip schema creation (assumes schema already applied)",
     )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help=(
+            "Issue #74 (G1-OPT-2) — run the deep-traversal diagnosis "
+            "and Fix A–D benchmarks after the latency benchmark completes "
+            "for each scale. Adds a 'diagnostics' block to the result JSON."
+        ),
+    )
+    parser.add_argument(
+        "--diagnose-n-queries",
+        type=int,
+        default=30,
+        help=(
+            "Per-fix query budget for the issue #74 diagnosis. "
+            "Each query runs at 2/4/6 hops, so wall time scales linearly. "
+            "(default: 30)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     scales = [_parse_scale(s) for s in args.scales]
@@ -204,13 +224,41 @@ def main(argv: list[str] | None = None) -> int:
             f"P99={bench['graph_traversal']['6_hop']['p99_ms']:.1f}ms"
         )
 
-        all_results.append(
-            {
-                "scale_label": scale_label,
-                "ingest": ingest_stats,
-                "benchmark": bench,
-            }
-        )
+        scale_block: dict[str, Any] = {
+            "scale_label": scale_label,
+            "ingest": ingest_stats,
+            "benchmark": bench,
+        }
+
+        if args.diagnose:
+            print(
+                f"[G1] Running issue #74 diagnostics "
+                f"({args.diagnose_n_queries} queries/fix) …"
+            )
+            try:
+                # Reuse the same seeds the latency benchmark sampled by
+                # taking a fresh sample of the same size from blocks.
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id FROM blocks "
+                        "TABLESAMPLE SYSTEM (1) LIMIT %s",
+                        (args.diagnose_n_queries,),
+                    )
+                    seed_ids = [r[0] for r in cur.fetchall()]
+                report = run_full_diagnosis(
+                    conn,
+                    seed_ids=seed_ids,
+                    n_queries=args.diagnose_n_queries,
+                )
+                scale_block["diagnostics"] = report.to_dict()
+                chosen = report.chosen_fix or "none"
+                print(f"[G1]   diagnose chose fix: {chosen}")
+                print(f"[G1]   {report.chosen_fix_rationale}")
+            except Exception as exc:  # pragma: no cover — runtime guard
+                print(f"[G1]   diagnose ERROR: {exc}", file=sys.stderr)
+                scale_block["diagnostics_error"] = str(exc)
+
+        all_results.append(scale_block)
 
     # Sizing memo (always computed — arithmetic, not experiment)
     sizing = compute_sizing_memo(embedding_dim=args.embedding_dim)
