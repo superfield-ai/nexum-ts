@@ -52,6 +52,12 @@ def _parse_args() -> argparse.Namespace:
         help="Skip loss curve plot generation",
     )
     parser.add_argument(
+        "--no-canonical-envelope",
+        action="store_true",
+        default=False,
+        help="Skip writing the canonical experiments/_lib envelope (used by tests).",
+    )
+    parser.add_argument(
         "--lr",
         type=float,
         default=1e-3,
@@ -234,6 +240,9 @@ def main() -> int:
         "pass": passed,
         "loss_curve": results["loss_curve"],
         "monotone_decrease": results["monotone_decrease"],
+        "monotone_decrease_strict": results.get("monotone_decrease_strict"),
+        "monotone_decrease_smoothed": results.get("monotone_decrease_smoothed"),
+        "smooth_window": results.get("smooth_window"),
         "gradient_health": results["gradient_health"],
         "n_steps": args.n_steps,
         "final_loss": results["final_loss"],
@@ -250,6 +259,61 @@ def main() -> int:
     with open(output_path, "w") as f:
         json.dump(output_doc, f, indent=2)
     print(f"Results written to: {output_path}")
+
+    # ------------------------------------------------------------------
+    # 6b. Emit canonical phase-0 envelope via experiments/_lib harness.
+    # ------------------------------------------------------------------
+    if args.no_canonical_envelope:
+        print("Canonical envelope skipped (--no-canonical-envelope).")
+    else:
+        try:
+            # Repo root is two levels above this experiment dir.
+            repo_root = exp_dir.parent.parent
+            if str(repo_root) not in sys.path:
+                sys.path.insert(0, str(repo_root))
+            from experiments._lib import (  # noqa: E402
+                ResultEnvelope,
+                capture_run_context,
+                write_result,
+            )
+
+            ctx = capture_run_context(gate="G0", hypothesis="H7.1", seed=args.seed)
+            envelope = ResultEnvelope(
+                gate="G0",
+                hypothesis="H7.1",
+                passed=passed,
+                metrics={
+                    "monotone_decrease": results["monotone_decrease"],
+                    "monotone_decrease_strict": results.get("monotone_decrease_strict"),
+                    "monotone_decrease_smoothed": results.get("monotone_decrease_smoothed"),
+                    "smooth_window": results.get("smooth_window"),
+                    "initial_loss": results["initial_loss"],
+                    "final_loss": results["final_loss"],
+                    "loss_delta": results["initial_loss"] - results["final_loss"],
+                    "gradient_health": results["gradient_health"],
+                    "n_steps": args.n_steps,
+                    "n_nodes": args.n_nodes,
+                    "n_edges": args.n_edges,
+                    "elapsed_seconds": elapsed,
+                    "ms_per_step": elapsed / args.n_steps * 1000.0 if args.n_steps else None,
+                    "lr": args.lr,
+                },
+                runtime=ctx,
+                notes=(
+                    "G0 / H7.1 kill criterion: typed-link message-passing forward + "
+                    "1K-step backprop on 10K-block synthetic corpus."
+                ),
+                extra={
+                    "loss_curve": results["loss_curve"],
+                    "gradient_norms": results["gradient_norms"],
+                    "training_warnings": results["warnings"],
+                    "legacy_results_path": str(output_path.as_posix()),
+                },
+            )
+            envelope_path = write_result(envelope, exp_dir)
+            print(f"Canonical envelope written to: {envelope_path}")
+        except Exception as exc:  # noqa: BLE001 — never block the spike on harness errors
+            print(f"warning: failed to write canonical envelope: {exc}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # 7. Plot (optional).

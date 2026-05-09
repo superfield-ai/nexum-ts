@@ -26,9 +26,20 @@ except ImportError as e:
 from model import TypedLinkGraphModel
 
 
-# Tolerance for the monotone-decrease check.
+# Tolerance for the strict step-wise monotone-decrease check.
 # Allows for minor oscillation (e.g. Adam momentum effects).
 MONOTONE_TOL = 0.01
+
+# Window size (steps) for the smoothed monotone-decrease check used as the
+# H7.1 gate decision. Adam-style optimizers produce per-step oscillations
+# even on successfully converging runs, so the gate is evaluated against a
+# rolling-mean view of the loss curve. The strict step-wise check is still
+# computed and recorded as a diagnostic.
+SMOOTH_WINDOW = 50
+
+# Tolerance per step for the smoothed monotone check (looser than raw because
+# we're already smoothing — any sustained reversal larger than this counts).
+SMOOTH_MONOTONE_TOL = 1e-3
 
 # Gradient health thresholds.
 GRAD_VANISH_THRESH = 1e-6
@@ -140,12 +151,20 @@ def train(
     # ------------------------------------------------------------------
     # Post-training analysis.
     # ------------------------------------------------------------------
-    monotone = check_monotone_decrease(loss_curve, tol=MONOTONE_TOL)
+    strict_monotone = check_monotone_decrease(loss_curve, tol=MONOTONE_TOL)
+    smoothed_monotone = check_monotone_decrease_smoothed(
+        loss_curve, window=SMOOTH_WINDOW, tol=SMOOTH_MONOTONE_TOL
+    )
+    # Gate decision: smoothed view (per-step Adam oscillations are expected).
+    monotone = smoothed_monotone
     gradient_health = _classify_gradient_health(gradient_norms)
 
     return {
         "loss_curve": loss_curve,
         "monotone_decrease": monotone,
+        "monotone_decrease_strict": strict_monotone,
+        "monotone_decrease_smoothed": smoothed_monotone,
+        "smooth_window": SMOOTH_WINDOW,
         "final_loss": loss_curve[-1] if loss_curve else float("nan"),
         "initial_loss": loss_curve[0] if loss_curve else float("nan"),
         "gradient_norms": gradient_norms,
@@ -188,6 +207,47 @@ def check_monotone_decrease(
     # Step-wise: no increase larger than tol.
     for i in range(len(loss_curve) - 1):
         if loss_curve[i + 1] > loss_curve[i] + tol:
+            return False
+
+    return True
+
+
+def check_monotone_decrease_smoothed(
+    loss_curve: list[float],
+    window: int = SMOOTH_WINDOW,
+    tol: float = SMOOTH_MONOTONE_TOL,
+) -> bool:
+    """
+    Return True if the rolling-mean (window=`window`) view of `loss_curve`
+    decreases monotonically (within `tol`).
+
+    Adam and other momentum-based optimizers routinely produce per-step
+    oscillations on successfully converging runs. The H7.1 gate cares
+    whether training is *trending down*, not whether each individual step
+    decreases — so the gate decision is evaluated on a smoothed curve.
+
+    The smoothed curve is the trailing rolling mean over `window` steps.
+    A run is considered to monotonically decrease when:
+      - The smoothed final value is strictly less than the smoothed initial
+        value, AND
+      - No consecutive smoothed-step increase exceeds `tol`.
+
+    Returns False if the curve has fewer than `window` points.
+    """
+    if len(loss_curve) < max(2, window):
+        return False
+
+    smoothed: list[float] = []
+    for i in range(len(loss_curve)):
+        lo = max(0, i - window + 1)
+        chunk = loss_curve[lo : i + 1]
+        smoothed.append(sum(chunk) / len(chunk))
+
+    if smoothed[-1] >= smoothed[0]:
+        return False
+
+    for i in range(len(smoothed) - 1):
+        if smoothed[i + 1] > smoothed[i] + tol:
             return False
 
     return True

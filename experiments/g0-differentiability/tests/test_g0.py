@@ -430,6 +430,42 @@ class TestMonotoneCheckLogic:
 
 
 # ---------------------------------------------------------------------------
+# 5b. test_monotone_check_smoothed
+# ---------------------------------------------------------------------------
+
+class TestMonotoneCheckSmoothed:
+    def test_oscillating_but_trending_down_passes(self):
+        """Adam-style oscillation around a downward trend should pass."""
+        from train import check_monotone_decrease_smoothed
+
+        import random
+        random.seed(0)
+        n = 500
+        trend = [1.0 - 0.9 * (i / (n - 1)) for i in range(n)]
+        # Noise amplitude small enough that a window=50 mean is dominated by trend.
+        curve = [t + random.uniform(-0.02, 0.02) for t in trend]
+        assert check_monotone_decrease_smoothed(curve, window=50, tol=1e-2) is True
+
+    def test_diverging_fails(self):
+        from train import check_monotone_decrease_smoothed
+
+        n = 200
+        curve = [0.5 + 0.001 * i for i in range(n)]
+        assert check_monotone_decrease_smoothed(curve, window=20, tol=1e-3) is False
+
+    def test_too_short_fails(self):
+        from train import check_monotone_decrease_smoothed
+
+        assert check_monotone_decrease_smoothed([1.0, 0.5], window=20) is False
+
+    def test_flat_fails(self):
+        from train import check_monotone_decrease_smoothed
+
+        curve = [0.5] * 100
+        assert check_monotone_decrease_smoothed(curve, window=10, tol=1e-3) is False
+
+
+# ---------------------------------------------------------------------------
 # 6. test_run_spike_exit_code
 # ---------------------------------------------------------------------------
 
@@ -452,8 +488,9 @@ class TestRunSpikeExitCode:
                 "--seed", "42",
                 "--n-nodes", "100",
                 "--n-edges", "500",
-                "--output", str(EXP_ROOT / "results" / "g0_test_run.json"),
+                "--output", str(EXP_ROOT / "results" / ".g0_test_run_tmp.json"),
                 "--no-plot",
+                "--no-canonical-envelope",
             ],
             capture_output=True,
             text=True,
@@ -489,6 +526,7 @@ class TestRunSpikeExitCode:
                     "--n-edges", "300",
                     "--output", tmp_output,
                     "--no-plot",
+                "--no-canonical-envelope",
                 ],
                 capture_output=True,
                 text=True,
