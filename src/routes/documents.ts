@@ -5,6 +5,7 @@ import { parseMarkdown } from '../ingest/parse-markdown.js'
 import { parsePdf } from '../ingest/parse-pdf.js'
 import { parseDocx } from '../ingest/parse-docx.js'
 import { contentHash } from '../ingest/dedup.js'
+import { timeStage } from '../ingest/timing.js'
 import type { ParsedBlock } from '../ingest/parse-text.js'
 
 route('POST', '/documents', async (req, res) => {
@@ -20,22 +21,28 @@ route('POST', '/documents', async (req, res) => {
   const corpus = await queryOne('SELECT id FROM corpora WHERE id = $1', [body.corpus_id])
   if (!corpus) return send(res, 404, { error: 'corpus not found' })
 
-  // Parse blocks
-  let parsedBlocks: ParsedBlock[]
-  if (body.format === 'pdf') {
-    const pdfBuffer = Buffer.from(body.content, 'base64')
-    parsedBlocks = await parsePdf(pdfBuffer)
-  } else if (body.format === 'markdown') {
-    parsedBlocks = parseMarkdown(body.content)
-  } else if (body.format === 'docx') {
-    const docxBuffer = Buffer.from(body.content, 'base64')
-    parsedBlocks = await parseDocx(docxBuffer)
-  } else {
-    parsedBlocks = parseText(body.content)
-  }
+  // Parse blocks — wrapped in timeStage so #12 / #75 can measure parse latency
+  // without modifying the route. See src/ingest/timing.ts.
+  const parsedBlocks: ParsedBlock[] = await timeStage('parse', { docId: null }, async () => {
+    if (body.format === 'pdf') {
+      const pdfBuffer = Buffer.from(body.content, 'base64')
+      return parsePdf(pdfBuffer)
+    } else if (body.format === 'markdown') {
+      return parseMarkdown(body.content)
+    } else if (body.format === 'docx') {
+      const docxBuffer = Buffer.from(body.content, 'base64')
+      return parseDocx(docxBuffer)
+    } else {
+      return parseText(body.content)
+    }
+  })
 
   // Hash all blocks
-  const hashes = parsedBlocks.map(b => contentHash(b.content))
+  const hashes = await timeStage(
+    'hash',
+    { docId: null, blockCount: parsedBlocks.length },
+    () => parsedBlocks.map(b => contentHash(b.content)),
+  )
 
   // Get pool for transaction
   const { getPool } = await import('../db/pool.js')

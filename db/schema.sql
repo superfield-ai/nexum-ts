@@ -120,6 +120,20 @@ CREATE INDEX IF NOT EXISTS links_dst_idx ON links (dst);
 CREATE INDEX IF NOT EXISTS links_src_layer_idx ON links (src, layer);
 CREATE INDEX IF NOT EXISTS links_dst_layer_idx ON links (dst, layer);
 
+-- Edge-embedding stub column — phase-1 dev-scout (issue #78), to be populated by #75.
+--
+-- This column is intentionally created NULL for every row at scout time. No
+-- ingest path or query path reads or writes it yet. It exists so that #75
+-- (AGE integration / edge-embedding writes) and downstream consumers can rely
+-- on a stable column name and dimension without coordinating a schema change.
+--
+-- Dimension matches the block embedding (384, all-MiniLM-L6-v2) so that early
+-- experiments can construct edge vectors as element-wise functions of the two
+-- endpoint block vectors. The dimension may be revisited once #75 chooses a
+-- production edge-encoder. See docs/research.md (Area 1) and
+-- docs/engineering.md (Phase-1 Scout Seams) for the seam contract.
+ALTER TABLE links ADD COLUMN IF NOT EXISTS edge_embedding vector(384);
+
 -- Entities: users and agents that can authenticate via API key
 CREATE TABLE IF NOT EXISTS entities (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
