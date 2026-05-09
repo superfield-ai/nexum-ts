@@ -155,3 +155,38 @@ If graph traversal P99 fails before semantic search, the binding constraint is
 recursive CTE depth — consider Apache AGE (Cypher on Postgres) or an external
 graph DB. If semantic search fails first, the binding constraint is HNSW index
 tuning or pgvector version.
+
+---
+
+## Real-embedding harness (issue #4 — H1.1 verification)
+
+`run_g1_real.py` runs the same gate, but ingests text per block and embeds
+with `sentence-transformers/all-MiniLM-L6-v2` (384-dim) instead of using
+random Gaussian vectors. This is required to interpret recall@10 as an
+index-quality signal — see the H1.1 caveat written in PR #81.
+
+```bash
+# Smallest reasonable smoke (≈30s on CPU)
+python run_g1_real.py \
+    --db-url postgresql://nexum:nexum@localhost:5433/nexum_bench_real \
+    --scale 10k --n-queries 50 --recall-queries 10
+
+# Acceptance-criterion run (largest scale that fits in your time budget)
+python run_g1_real.py --scale 500k --n-queries 100 --recall-queries 30
+```
+
+Differences vs. `run_benchmark.py`:
+
+- **Ingest:** `ingest_real.generate_and_ingest_real`. Uses topic-templated
+  English sentences (8 topics) embedded by `all-MiniLM-L6-v2`. Embedding
+  rate on a 40-thread CPU is ~440-880 sentences/second.
+- **Bench:** `bench_real.run_latency_benchmark_real`. Same shape, plus a
+  `recall` block computed against an exact brute-force baseline (forced
+  via `SET LOCAL enable_indexscan = off`).
+- **Envelope:** Written via `experiments/_lib/results_writer.py`
+  (`schema_version=1`).
+- **Pass criterion:** *Both* P99 < 500ms across all modes AND mean
+  recall@10 ≥ 0.90.
+
+Tests live in `tests/test_g1_real.py` and run without a DB and without
+`sentence-transformers` installed (the model loader is mocked).
