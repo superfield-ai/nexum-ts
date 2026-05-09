@@ -1,0 +1,60 @@
+name: experiments-harness
+
+on:
+  push:
+    paths:
+      - 'experiments/_lib/**'
+      - 'scripts/update-hypothesis-status.sh'
+      - 'docs/research/methodology.md'
+      - '.github/workflows/experiments-harness.yml'
+  pull_request:
+    paths:
+      - 'experiments/_lib/**'
+      - 'scripts/update-hypothesis-status.sh'
+      - 'docs/research/methodology.md'
+      - '.github/workflows/experiments-harness.yml'
+
+jobs:
+  smoke:
+    name: phase-0 harness smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run harness pytest (100-block toy corpus smoke)
+        run: python -m pytest experiments/_lib/tests/ -q
+
+      - name: Smoke-test update-hypothesis-status.sh idempotency
+        run: |
+          set -euo pipefail
+          cp docs/research/hypotheses/H1.1_postgres-sufficient-20m-blocks.md /tmp/H1.1_test.md
+          SOURCE_DATE_EPOCH=1700000000 \
+            scripts/update-hypothesis-status.sh \
+              /tmp/H1.1_test.md passed \
+              experiments/g1-postgres-scale/results/g1_test.json
+          A=$(md5sum /tmp/H1.1_test.md | cut -d' ' -f1)
+          SOURCE_DATE_EPOCH=1700000000 \
+            scripts/update-hypothesis-status.sh \
+              /tmp/H1.1_test.md passed \
+              experiments/g1-postgres-scale/results/g1_test.json
+          B=$(md5sum /tmp/H1.1_test.md | cut -d' ' -f1)
+          if [[ "$A" != "$B" ]]; then
+            echo "update-hypothesis-status.sh is not idempotent" >&2
+            exit 1
+          fi
+
+      - name: Verify legacy g4 result still parseable
+        run: |
+          python -c "import json,sys; \
+            p='experiments/g4-onnx-lossless/results/g4_result.json'; \
+            d=json.load(open(p)); \
+            assert d['gate']=='G4'; \
+            assert 'pass' in d; \
+            print('legacy g4 ok')"
