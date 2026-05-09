@@ -3,15 +3,17 @@ name: experiments-harness
 on:
   push:
     paths:
-      - 'experiments/_lib/**'
+      - 'experiments/**'
       - 'scripts/update-hypothesis-status.sh'
       - 'docs/research/methodology.md'
+      - 'docs/research/hypotheses/**'
       - '.github/workflows/experiments-harness.yml'
   pull_request:
     paths:
-      - 'experiments/_lib/**'
+      - 'experiments/**'
       - 'scripts/update-hypothesis-status.sh'
       - 'docs/research/methodology.md'
+      - 'docs/research/hypotheses/**'
       - '.github/workflows/experiments-harness.yml'
 
 jobs:
@@ -25,11 +27,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install pytest
-        run: python -m pip install --upgrade pip pytest
+      - name: Install pytest and harness deps
+        run: python -m pip install --upgrade pip pytest numpy psycopg2-binary
 
       - name: Run harness pytest (100-block toy corpus smoke)
         run: python -m pytest experiments/_lib/tests/ -q
+
+      - name: Run G1-OPT-1 diagnose_hnsw unit tests (db-free)
+        run: python -m pytest experiments/g1-postgres-scale/tests/test_diagnose_hnsw.py -q
 
       - name: Smoke-test update-hypothesis-status.sh idempotency
         run: |
