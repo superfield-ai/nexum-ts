@@ -1,6 +1,7 @@
 import { route, send, readBody } from '../server.js'
 import { query, queryOne } from '../db/queries.js'
 import { embedTexts } from '../embed/local.js'
+import { getAgePool } from '../db/age.js'
 
 const queryCache = new Map<string, { embedding: number[]; expires: number }>()
 
@@ -33,7 +34,11 @@ route('POST', '/query', async (req, res) => {
     if (!body.seed_block_id) return send(res, 400, { error: 'seed_block_id is required for graph mode' })
     const maxHops = body.max_hops ?? 3
     const layers = body.layers ?? ['structural', 'semantic', 'ai']
-    return send(res, 200, { results: await graphSearch(body.seed_block_id, maxHops, layers, limit) })
+    const relTypes = body.rel_types as string[] | undefined
+    const direction = (body.direction as 'out' | 'in' | 'both' | undefined) ?? 'out'
+    return send(res, 200, {
+      results: await graphSearch(body.seed_block_id, maxHops, layers, limit, relTypes, direction),
+    })
   }
   if (mode === 'hybrid') {
     if (!body.query) return send(res, 400, { error: 'query is required for hybrid mode' })
@@ -155,29 +160,156 @@ async function fulltextSearch(corpusId: string, queryText: string, limit: number
   }))
 }
 
-async function graphSearch(seedBlockId: string, maxHops: number, layers: string[], limit: number) {
+/**
+ * Graph traversal via Apache AGE Cypher (issue #101).
+ *
+ * Replaces the pre-cutover recursive-CTE traversal over the `links` table
+ * with a Cypher variable-length path query against the `nexum_links` AGE
+ * graph. The behaviour contract stays identical:
+ *
+ *  - Discover blocks reachable from `seedBlockId` within `maxHops` edges,
+ *    filtered by edge `layer` (and optionally `rel_type` and direction).
+ *  - Return one row per distinct reachable block at its *minimum* depth,
+ *    ordered by depth ascending, capped at `limit`.
+ *  - The response shape is the same `{block_id, content, depth, rel_type,
+ *    document}` object the recursive-CTE implementation produced, so
+ *    consumers (including hybrid mode) need no changes.
+ *
+ * The recursive-CTE traversal is intentionally retired here — issue #103
+ * removes the now-unused helper code in a follow-up cleanup.
+ *
+ * Parameter inlining
+ * ------------------
+ * AGE's `cypher(...)` SQL function does not support bound parameters, so
+ * scalar arguments are inlined into the Cypher string. Every inlined value
+ * is either:
+ *   - a UUID validated against the canonical 8-4-4-4-12 hex pattern, or
+ *   - a member of a hard-coded whitelist (layers, direction), or
+ *   - escaped (rel_types) — and every rel_type is single-quoted into a
+ *     Cypher list literal, so a stray quote breaks the literal rather than
+ *     escaping into the surrounding statement.
+ */
+async function graphSearch(
+  seedBlockId: string,
+  maxHops: number,
+  layers: string[],
+  limit: number,
+  relTypes?: string[],
+  direction: 'out' | 'in' | 'both' = 'out',
+) {
+  // Defensive validation: a malformed seed UUID would otherwise be inlined
+  // into Cypher as a literal string and either silently match nothing or,
+  // worse, allow injection. UUID-shaped seeds are required by the schema.
+  if (!UUID_RE.test(seedBlockId)) return []
+  const hops = Math.max(1, Math.min(Number(maxHops) || 1, 10))
+  const safeLayers = (layers ?? []).filter((l) => ALLOWED_LAYERS.has(l))
+  if (safeLayers.length === 0) return []
+
+  const layerList = safeLayers.map((l) => `'${l}'`).join(', ')
+  let relFilter = `r.layer IN [${layerList}]`
+  if (relTypes && relTypes.length > 0) {
+    const safeRelList = relTypes
+      .map((rt) => `'${String(rt).replace(/'/g, "\\'")}'`)
+      .join(', ')
+    relFilter += ` AND r.rel_type IN [${safeRelList}]`
+  }
+
+  // Direction maps to Cypher edge orientation. AGE supports
+  // `-[r:LINK*1..N]->` (out), `<-[r:LINK*1..N]-` (in), and
+  // `-[r:LINK*1..N]-` (both / undirected).
+  const arrowL = direction === 'in' ? '<-' : '-'
+  const arrowR = direction === 'out' ? '->' : '-'
+
+  // ALL(rel IN relationships(p) WHERE ...) applies the layer/rel_type
+  // filter to *every* edge in the path, not just the first one — matching
+  // the recursive CTE which gates each hop on `layer = ANY($2)`.
+  const cypher = `
+    MATCH p = (a:Block {id: '${seedBlockId}'})${arrowL}[r:LINK*1..${hops}]${arrowR}(b:Block)
+    WHERE ALL(rel IN relationships(p) WHERE ${relFilter.replace(/\br\./g, 'rel.')})
+    RETURN b.id AS block_id, length(p) AS depth, last(relationships(p)).rel_type AS rel_type
+  `
+
+  const pool = await getAgePool()
+  let rawRows: Array<Record<string, unknown>> = []
+  try {
+    const result = await pool.query<{ block_id: unknown; depth: unknown; rel_type: unknown }>(
+      `SELECT * FROM cypher('nexum_links', $$ ${cypher} $$) AS (block_id agtype, depth agtype, rel_type agtype)`,
+    )
+    rawRows = result.rows as any[]
+  } catch (err) {
+    console.error('graphSearch cypher failed', (err as Error).message)
+    return []
+  }
+
+  // Collapse to one entry per block at minimum depth, preserving the
+  // rel_type of whichever shortest-path edge was seen first. Mirrors the
+  // recursive CTE's `SELECT DISTINCT ... ORDER BY g.depth`.
+  const byBlock = new Map<string, { depth: number; rel_type: string | null }>()
+  for (const row of rawRows) {
+    const blockId = parseAgString(row.block_id)
+    const depth = parseAgNumber(row.depth)
+    const relType = parseAgString(row.rel_type)
+    if (!blockId || depth == null) continue
+    const existing = byBlock.get(blockId)
+    if (!existing || depth < existing.depth) {
+      byBlock.set(blockId, { depth, rel_type: relType })
+    }
+  }
+  if (byBlock.size === 0) return []
+
+  // Hydrate block content + document metadata from the relational store in
+  // one round-trip. Sorting by depth happens client-side because Postgres
+  // cannot recover the per-block depth without an extra JOIN against a
+  // values list.
+  const blockIds = Array.from(byBlock.keys())
   const rows = await query<any>(
-    `WITH RECURSIVE graph AS (
-       SELECT dst AS id, 1 AS depth, ARRAY[src] AS path, rel_type
-       FROM links WHERE src = $1 AND layer = ANY($2)
-       UNION ALL
-       SELECT l.dst, g.depth + 1, g.path || l.src, l.rel_type
-       FROM links l JOIN graph g ON l.src = g.id
-       WHERE g.depth < $3 AND l.src != ALL(g.path)
-     )
-     SELECT DISTINCT b.id AS block_id, b.content,
-            g.depth, g.rel_type,
+    `SELECT b.id AS block_id, b.content,
             d.id AS doc_id, d.title, d.external_id
-     FROM graph g JOIN blocks b ON b.id = g.id
-     JOIN documents d ON d.id = b.doc_id
-     ORDER BY g.depth LIMIT $4`,
-    [seedBlockId, layers, maxHops, limit]
+     FROM blocks b JOIN documents d ON d.id = b.doc_id
+     WHERE b.id = ANY($1::uuid[])`,
+    [blockIds],
   )
-  return rows.map((r: any) => ({
-    block_id: r.block_id, content: r.content,
-    depth: r.depth, rel_type: r.rel_type,
-    document: { id: r.doc_id, title: r.title, external_id: r.external_id }
-  }))
+  const byId = new Map(rows.map((r: any) => [r.block_id, r]))
+  const merged = blockIds
+    .map((id) => {
+      const r = byId.get(id)
+      const meta = byBlock.get(id)!
+      if (!r) return null
+      return {
+        block_id: r.block_id,
+        content: r.content,
+        depth: meta.depth,
+        rel_type: meta.rel_type,
+        document: { id: r.doc_id, title: r.title, external_id: r.external_id },
+      }
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null)
+  merged.sort((a, b) => a.depth - b.depth)
+  return merged.slice(0, limit)
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const ALLOWED_LAYERS = new Set(['structural', 'semantic', 'ai'])
+
+/**
+ * AGE returns scalar string columns as agtype, surfaced by node-postgres as
+ * a JS string with the value double-quoted (e.g. `"abc-uuid"`). Strip the
+ * wrapping quotes to recover the raw value. Returns null for absent values.
+ */
+function parseAgString(v: unknown): string | null {
+  if (v == null) return null
+  const s = String(v)
+  if (s === 'null') return null
+  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1)
+  return s
+}
+
+/** AGE returns numeric columns as the number's text form, e.g. `"2"` → 2. */
+function parseAgNumber(v: unknown): number | null {
+  if (v == null) return null
+  const s = String(v).replace(/^"|"$/g, '')
+  const n = Number(s)
+  return Number.isFinite(n) ? n : null
 }
 
 async function hybridSearch(corpusId: string, queryText: string, limit: number) {

@@ -31,13 +31,21 @@ test('query route source contains all four modes', () => {
   assert.ok(contents.includes("mode === 'hybrid'"), "should handle hybrid mode")
 })
 
-test('graph mode source uses recursive CTE with depth tracking', () => {
+test('graph mode source issues a Cypher query through the AGE adapter (issue #101)', () => {
   const srcPath = path.resolve(__dirname, '../../src/routes/query.ts')
   const contents = fs.readFileSync(srcPath, 'utf8')
 
-  assert.ok(contents.includes('WITH RECURSIVE graph'), 'graphSearch should use a recursive CTE')
-  assert.ok(contents.includes('g.depth'), 'graphSearch result should include depth')
-  assert.ok(contents.includes('g.rel_type'), 'graphSearch result should include rel_type')
+  // Phase-1 cutover: graphSearch now traverses the AGE `nexum_links` graph
+  // via Cypher rather than running a recursive CTE against the `links` table.
+  assert.ok(
+    contents.includes("from '../db/age.js'") || contents.includes('from "../db/age.js"'),
+    'graphSearch should import the AGE adapter'
+  )
+  assert.ok(contents.includes("cypher('nexum_links'"), 'graphSearch should issue a Cypher call against the nexum_links graph')
+  assert.ok(contents.includes('[r:LINK*1..'), 'graphSearch should use a variable-length LINK pattern')
+  assert.ok(!contents.includes('WITH RECURSIVE graph'), 'graphSearch must no longer use the recursive CTE')
+  assert.ok(contents.includes('depth'), 'graphSearch result should include depth')
+  assert.ok(contents.includes('rel_type'), 'graphSearch result should include rel_type')
 })
 
 test('hybrid mode source performs semantic search then graph expansion', () => {
