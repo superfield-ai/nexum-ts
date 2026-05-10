@@ -415,6 +415,9 @@ def _export_fallback(
     model_proto = helper.make_model(graph, opset_imports=[
         helper.make_opsetid("", opset_version)
     ])
+    # Pin IR version to 10 — broadly compatible with onnxruntime 1.18+
+    # (newer onnx defaults to IR=13 which onnxruntime 1.23 still rejects).
+    model_proto.ir_version = 10
     model_proto.doc_string = (
         "G4 ONNX losslessness spike. "
         "NOT distillation — same parameters as the live PyTorch model. "

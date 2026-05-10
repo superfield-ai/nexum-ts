@@ -149,3 +149,51 @@ Install:
 ```bash
 pip install -e ".[dev]"
 ```
+
+---
+
+## Issue #18 — integrated full-run results (2026-05-10)
+
+The orchestrator was run at **25,000 blocks x 1,500 gradient steps** (CPU,
+seed 42) — an honest smaller-scale validation that the integrated pipeline
+is end-to-end functional. The plan spec calls for 100,000 blocks; the scale
+gap is documented here intentionally and is the primary follow-up.
+
+| Hypothesis | Pass criterion | Measured | Pass? |
+|---|---|---|---|
+| H7.1 — training convergence | Both task accuracies improve, loss decreases | clause +0.140 -> 0.714, contradiction +0.386 -> 0.898 | yes |
+| H7.3 — ONNX losslessness | `accuracy_delta < 0.01` | accuracy_delta=0.000, max_logit_diff=3.81e-06, 3.06 MB | yes |
+| H7.4 — staleness curve captured | curves plotted at 4 update rates | half-life 14d / 14d / 14d / 3.37d at 10/100/1K/10K blocks/day | curves captured; super-linear inflection between 1K and 10K |
+| H7.5 — throughput ratio >= 10x | ONNX P50 vs. live-graph 50 ms baseline | ONNX P50=0.048 ms, ratio ~ 1046x | yes (caveat: live-graph baseline is the Area 3 reference figure, not a co-located measurement) |
+
+Honest scope notes:
+- 25K blocks instead of 100K — scale gap of 4x. Sub-criteria all pass at this
+  scale; the larger run is a future GPU-class job.
+- ONNX export uses the G4 NumPy-weight fallback (PyG scatter ops are not
+  traceable in the current `torch.onnx.export` + `onnxscript` combination on
+  this host). Lossless equivalence is preserved by construction — every
+  parameter is round-tripped exactly.
+- IR version pinned to 10 in the fallback exporter for compatibility with
+  onnxruntime <= 1.23 (newer onnx defaults to IR=13 which the runtime rejects).
+- H7.4 staleness is a deterministic simulation, not a live re-evaluation
+  against an updating corpus. The simulation is sufficient to plot the
+  decay-rate inflection but not to claim a workload-level number.
+- H7.5 live-graph latency uses the Area 3 reference figure (50 ms) rather
+  than a co-located measurement; the throughput ratio should be read as
+  "ONNX is sub-millisecond at this scale" rather than a precise multiplier.
+
+Artifacts:
+- Canonical envelope: `results/a7_20260510T025605Z.json`
+- Raw run JSON: `results/area7_full_25k.json`
+- Staleness plot: `results/area7_staleness_curve.png`
+- Run log: `results/area7_full_25k.log` (gitignored)
+- ONNX model + weights: `results/area7_full_25k.onnx`, `..._weights.npz` (gitignored)
+
+Reproduce:
+```bash
+cd experiments/area7-differentiable-graph
+python run_area7.py --n-blocks 25000 --n-steps 1500 \
+    --output results/area7_full_25k.json \
+    --onnx-path results/area7_full_25k.onnx
+python write_envelope.py --raw results/area7_full_25k.json
+```
