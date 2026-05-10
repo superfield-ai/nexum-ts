@@ -8,6 +8,11 @@ try {
 } catch {}
 export const config = {
   DATABASE_URL: process.env.DATABASE_URL ?? 'postgresql://nexum:nexum@localhost:5432/nexum',
+  // Apache AGE companion DB (issue #75). Optional: when unset, the linker
+  // skips AGE dual-writes silently. When set, the linker writes every new
+  // edge into AGE as a `LINK` between two `Block` vertices in the
+  // `nexum_links` graph.
+  AGE_DATABASE_URL: process.env.AGE_DATABASE_URL ?? '',
   PORT: parseInt(process.env.PORT ?? '3000'),
   AUTH_OFF: process.env.NEXUM_AUTH === 'off',
 }

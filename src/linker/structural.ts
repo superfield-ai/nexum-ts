@@ -1,6 +1,9 @@
 import { claimJob, completeJob, failJob, enqueueJob } from '../db/jobs.js'
 import { query, execute } from '../db/queries.js'
 import { randomUUID } from 'node:crypto'
+import { embedEdge } from './edge-embed.js'
+import { writeAgeEdge } from '../db/age.js'
+import { timeStage } from '../ingest/timing.js'
 
 const CITATION_PATTERNS = [
   { regex: /§\s*(\d+[\.\d]*)/g,          type: 'section' },
@@ -47,8 +50,8 @@ export async function processStructuralLinks(versionId: string): Promise<void> {
       else if (refType === 'schedule') searchPattern = `%Schedule ${refValue}%`
       else searchPattern = `%${refValue}%`
 
-      const targets = await query<{ id: string }>(
-        `SELECT b.id FROM blocks b
+      const targets = await query<{ id: string; content: string }>(
+        `SELECT b.id, b.content FROM blocks b
          JOIN version_blocks vb ON vb.block_id = b.id
          WHERE vb.version_id = $1
            AND b.id != $2
@@ -58,17 +61,29 @@ export async function processStructuralLinks(versionId: string): Promise<void> {
 
       for (const target of targets) {
         if (target.id === block.id) continue // skip self-references
-        await execute(
-          `INSERT INTO links (id, src, dst, layer, rel_type, weight, confirmed, provenance)
-           VALUES ($1, $2, $3, 'structural', 'cites', 1.0, null, $4)
-           ON CONFLICT DO NOTHING`,
-          [
-            randomUUID(),
-            block.id,
-            target.id,
-            JSON.stringify({ model: 'regex', confidence: 1.0, created_at: new Date().toISOString() })
-          ]
+
+        // Edge embedding for the citation edge (issue #75, phase-2).
+        const edgeVec = await timeStage('edge_embed', { docId: block.doc_id, blockCount: 1 }, () =>
+          embedEdge(block.content, target.content, 'cites'),
         )
+
+        await execute(
+          `INSERT INTO links (id, src, dst, layer, rel_type, weight, confirmed, provenance, edge_embedding)
+           VALUES ($1, $2, $3, 'structural', 'cites', 1.0, null, $4, ${edgeVec ? '$5::vector' : 'NULL'})
+           ON CONFLICT DO NOTHING`,
+          edgeVec
+            ? [
+                randomUUID(), block.id, target.id,
+                JSON.stringify({ model: 'regex', confidence: 1.0, created_at: new Date().toISOString() }),
+                edgeVec,
+              ]
+            : [
+                randomUUID(), block.id, target.id,
+                JSON.stringify({ model: 'regex', confidence: 1.0, created_at: new Date().toISOString() }),
+              ],
+        )
+
+        await writeAgeEdge({ src: block.id, dst: target.id, layer: 'structural', relType: 'cites', weight: 1.0 })
       }
     }
   }

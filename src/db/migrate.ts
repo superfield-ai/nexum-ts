@@ -1,5 +1,7 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import pg from 'pg'
 import { getPool } from './pool.js'
+import { config } from '../config.js'
 
 export async function migrate() {
   const sql = readFileSync(new URL('../../../db/schema.sql', import.meta.url), 'utf-8')
@@ -16,6 +18,42 @@ export async function migrate() {
     console.log('Migration complete')
   } finally {
     client.release()
+  }
+
+  // Apply AGE-side migrations (issue #75). Only runs when AGE_DATABASE_URL is
+  // configured. Each migration file is idempotent. The compose stack also
+  // applies these via docker-entrypoint-initdb.d; running them here covers
+  // hosted Postgres-AGE deployments that do not use the entrypoint hook and
+  // also makes integration tests deterministic when they bring up an AGE
+  // container after the volume is already initialized.
+  await migrateAge()
+}
+
+export async function migrateAge(): Promise<boolean> {
+  if (!config.AGE_DATABASE_URL) return false
+  const migrationsDir = new URL('../../../db/migrations/', import.meta.url)
+  const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()
+  if (files.length === 0) return false
+
+  const agePool = new pg.Pool({ connectionString: config.AGE_DATABASE_URL })
+  try {
+    const client = await agePool.connect()
+    try {
+      for (const file of files) {
+        const sql = readFileSync(new URL(file, migrationsDir), 'utf-8')
+        // AGE shim is a single DO $$ ... $$ block; pass it whole.
+        await client.query(sql)
+      }
+      console.log(`AGE migrations applied (${files.length})`)
+    } finally {
+      client.release()
+    }
+    return true
+  } catch (err) {
+    console.error('AGE migration failed (continuing without AGE):', (err as Error).message)
+    return false
+  } finally {
+    await agePool.end().catch(() => {})
   }
 }
 

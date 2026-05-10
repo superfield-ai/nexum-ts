@@ -134,6 +134,11 @@ CREATE INDEX IF NOT EXISTS links_dst_layer_idx ON links (dst, layer);
 -- docs/engineering.md (Phase-1 Scout Seams) for the seam contract.
 ALTER TABLE links ADD COLUMN IF NOT EXISTS edge_embedding vector(384);
 
+-- HNSW index on edge embeddings (issue #75, phase-2). Cosine ops to mirror
+-- block-embedding usage so the query planner picks the same operator class.
+CREATE INDEX IF NOT EXISTS links_edge_embedding_hnsw_idx
+    ON links USING hnsw (edge_embedding vector_cosine_ops);
+
 -- Entities: users and agents that can authenticate via API key
 CREATE TABLE IF NOT EXISTS entities (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),

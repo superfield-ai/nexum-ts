@@ -39,8 +39,86 @@ route('POST', '/query', async (req, res) => {
     if (!body.query) return send(res, 400, { error: 'query is required for hybrid mode' })
     return send(res, 200, { results: await hybridSearch(body.corpus_id, body.query, limit) })
   }
+  if (mode === 'edge_semantic') {
+    // Edge similarity search (issue #75, phase-2). Caller supplies either:
+    //   - `query`: free-text — embedded directly with the block model so it
+    //     lives in the same 384-D space as edge embeddings.
+    //   - `(src_text, dst_text, rel_hint)`: structured triple, embedded as
+    //     "<rel_hint>: <src_text> -> <dst_text>" mirroring the linker's
+    //     buildEdgeText template so retrieval probes the same construction
+    //     used at write time.
+    // Optional `layers` filters on link.layer.
+    const hasTriple = body.src_text && body.dst_text
+    if (!body.query && !hasTriple) {
+      return send(res, 400, { error: 'query or (src_text,dst_text) required for edge_semantic mode' })
+    }
+    let probeText: string
+    if (hasTriple) {
+      const { buildEdgeText } = await import('../linker/edge-embed.js')
+      probeText = buildEdgeText(body.src_text, body.dst_text, body.rel_hint ?? null)
+    } else {
+      probeText = body.query
+    }
+    const layers = body.layers as string[] | undefined
+    return send(res, 200, { results: await edgeSemanticSearch(body.corpus_id, probeText, layers, limit) })
+  }
   return send(res, 400, { error: `unknown mode: ${mode}` })
 })
+
+async function edgeSemanticSearch(
+  corpusId: string,
+  probeText: string,
+  layers: string[] | undefined,
+  limit: number,
+) {
+  const vec = await getCachedEmbedding(probeText)
+  const vecStr = `[${vec.join(',')}]`
+  const params: any[] = [vecStr, corpusId, limit]
+  let layerFilter = ''
+  if (layers && layers.length > 0) {
+    params.push(layers)
+    layerFilter = ` AND l.layer = ANY($${params.length})`
+  }
+  // Both endpoint blocks must belong to documents in the requested corpus,
+  // matching the corpus-scoping invariant the other modes enforce.
+  const rows = await query<any>(
+    `SELECT l.id AS link_id, l.layer, l.rel_type, l.weight,
+            1 - (l.edge_embedding <=> $1::vector) AS score,
+            sb.id AS src_block_id, sb.content AS src_content,
+            db.id AS dst_block_id, db.content AS dst_content,
+            sd.id AS src_doc_id, sd.title AS src_doc_title,
+            dd.id AS dst_doc_id, dd.title AS dst_doc_title
+     FROM links l
+     JOIN blocks sb ON sb.id = l.src
+     JOIN blocks db ON db.id = l.dst
+     JOIN documents sd ON sd.id = sb.doc_id
+     JOIN documents dd ON dd.id = db.doc_id
+     WHERE l.edge_embedding IS NOT NULL
+       AND sd.corpus_id = $2
+       AND dd.corpus_id = $2
+       ${layerFilter}
+     ORDER BY l.edge_embedding <=> $1::vector
+     LIMIT $3`,
+    params,
+  )
+  return rows.map((r: any) => ({
+    link_id: r.link_id,
+    layer: r.layer,
+    rel_type: r.rel_type,
+    weight: r.weight !== null ? parseFloat(r.weight) : null,
+    score: parseFloat(r.score),
+    src: {
+      block_id: r.src_block_id,
+      content: r.src_content,
+      document: { id: r.src_doc_id, title: r.src_doc_title },
+    },
+    dst: {
+      block_id: r.dst_block_id,
+      content: r.dst_content,
+      document: { id: r.dst_doc_id, title: r.dst_doc_title },
+    },
+  }))
+}
 
 async function semanticSearch(corpusId: string, queryText: string, limit: number) {
   const vec = await getCachedEmbedding(queryText)
