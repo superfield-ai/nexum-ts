@@ -52,8 +52,11 @@ Training on graph-derived sequences generalises better across document versions 
 | `lm_finetuner.py` | `CurriculumFinetuner` — sentence-transformer fine-tuning (contrastive + classification) |
 | `link_density_ablation.py` | H2.1 variant: sweep confidence threshold, measure downstream accuracy |
 | `link_type_ablation.py` | H2.3: separate models for structural / semantic / AI link layers |
-| `run_area2.py` | Orchestrator CLI |
+| `run_area2.py` | Orchestrator CLI for the four-hypothesis fan-out (uses mock accuracy) |
+| `h2_1_curriculum_trainer.py` | **Honest H2.1 head-to-head**: three orderings × tiny linear classifier |
+| `run_h2_1_headtohead.py` | Runs the head-to-head and emits a canonical result envelope |
 | `tests/test_area2.py` | 11 unit tests (10 fast, 1 slow / skipped by default) |
+| `tests/test_h2_1_trainer.py` | 3 fast smoke tests for the head-to-head trainer |
 
 ---
 
@@ -122,3 +125,29 @@ Pairs same-UUID blocks whose text changed between v1 and v2 (positive) against u
 | `structural` | cites, elaborates, is-exception-to | Document parser |
 | `semantic` | supports, contradicts | Rule-based / human |
 | `ai` | anything else | LLM classifier with confidence score |
+
+---
+
+## H2.1 result (initial run)
+
+Run: `python h2_1_curriculum_trainer.py` via `run_h2_1_headtohead.py`,
+800 synthetic blocks × 5 seeds × 6 epochs, linear hashed-bag-of-tokens
+classifier on a domain-classification task. Three orderings of the **same**
+training examples:
+
+| Ordering | mean eval acc | stdev | epochs to 0.80 |
+|----------|---------------|-------|-----------------|
+| BFS over `supports` (naive, by in-degree) | 0.448 | 0.081 | never reached |
+| BFS, round-robin interleaved per domain | 0.974 | 0.023 | 3.8 |
+| Random shuffle (baseline) | 0.978 | 0.022 | 3.6 |
+
+**Verdict for H2.1: tie / not supported at this scale.** The graph-aware
+interleaved curriculum matches random ordering within stdev; the naive BFS
+curriculum collapses (catastrophic interference from long same-domain runs).
+This is an honest negative result for the *ordering-only* form of H2.1 on a
+synthetic corpus with a linear model. The richer contrastive triplet form
+(`build_contrastive_curriculum` + `lm_finetuner.train_contrastive`) is left
+as the natural follow-up — that variant is non-trivially different because it
+changes the training *examples*, not just their order.
+
+Result envelope: `results/h2.1_*.json` (canonical phase-0 envelope shape).
