@@ -38,7 +38,26 @@ matches or beats vanilla RAG accuracy above that hop-depth threshold.
 **Target:** `nexum_better` at all measured hop depths >= 3.
 
 Module: `compositional_reasoning.py` → `build_multihop_questions()`,
-`run_compositional_benchmark()`
+`run_compositional_benchmark()`. Executable benchmark in
+`run_h4_2_multihop.py` (synthetic 30-contract corpus, 100 questions across
+hop depths 2/3/4/5).
+
+**Run (2026-05-10, all-MiniLM-L6-v2):**
+
+| Hops | Vanilla | Graph | Delta |
+| ---: | ------: | ----: | ----: |
+| 2 | 0.200 | 0.640 | +0.440 |
+| 3 | 0.200 | 0.680 | +0.480 |
+| 4 | 0.280 | 0.920 | +0.640 |
+| 5 | 0.200 | 0.800 | +0.600 |
+
+`h4_2_supported = True` on the synthetic substrate. See
+`docs/research/hypotheses/H4.2_multihop-compositional-reasoning.md` for the
+full result envelope and caveats. Reproduce with:
+
+```bash
+python3 experiments/area4-provenance/run_h4_2_multihop.py
+```
 
 ---
 
