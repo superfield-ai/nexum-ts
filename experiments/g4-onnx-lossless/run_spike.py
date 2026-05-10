@@ -51,8 +51,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-training-steps",
         type=int,
-        default=500,
-        help="Number of gradient steps to train the G0 model (default: 500)",
+        default=1000,
+        help=(
+            "Number of gradient steps to train the G0 model (default: 1000, "
+            "matching the G0 / H7.1 kill-criterion spec from PR #83)"
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -95,6 +98,33 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=1e-3,
         help="Training learning rate (default: 1e-3)",
+    )
+    parser.add_argument(
+        "--g0-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a trained G0 model state_dict (.pt). "
+            "If provided, training is skipped and these weights are loaded "
+            "directly — exercising the actual G0 model from PR #83 rather "
+            "than re-training a fresh one."
+        ),
+    )
+    parser.add_argument(
+        "--save-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to write the trained G0 model state_dict to. "
+            "Useful so a subsequent run can pass --g0-checkpoint and skip "
+            "the training step."
+        ),
+    )
+    parser.add_argument(
+        "--no-canonical-envelope",
+        action="store_true",
+        default=False,
+        help="Skip writing the canonical experiments/_lib envelope.",
     )
     return parser.parse_args()
 
@@ -162,21 +192,46 @@ def main() -> int:
     )
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
-    print(f"Training for {args.n_training_steps} steps at lr={args.lr} ...")
 
-    t1 = time.perf_counter()
-    train_results = g0_train(
-        model=model,
-        data=data,
-        n_steps=args.n_training_steps,
-        lr=args.lr,
-        verbose=True,
-    )
-    elapsed_train = time.perf_counter() - t1
-    print(f"Training complete in {elapsed_train:.1f}s")
-    print(f"  Initial loss : {train_results['initial_loss']:.4f}")
-    print(f"  Final loss   : {train_results['final_loss']:.4f}")
-    print()
+    if args.g0_checkpoint:
+        # Load the actual trained G0 model rather than re-training.
+        ckpt_path = Path(args.g0_checkpoint)
+        if not ckpt_path.exists():
+            print(f"ERROR: G0 checkpoint not found: {ckpt_path}")
+            return 1
+        print(f"Loading G0 checkpoint: {ckpt_path}")
+        state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(state)
+        train_results = {
+            "initial_loss": float("nan"),
+            "final_loss": float("nan"),
+            "monotone_decrease": None,
+            "gradient_health": "skipped (loaded from checkpoint)",
+        }
+        elapsed_train = 0.0
+        t1 = time.perf_counter()
+    else:
+        print(f"Training for {args.n_training_steps} steps at lr={args.lr} ...")
+        t1 = time.perf_counter()
+        train_results = g0_train(
+            model=model,
+            data=data,
+            n_steps=args.n_training_steps,
+            lr=args.lr,
+            verbose=True,
+        )
+        elapsed_train = time.perf_counter() - t1
+        print(f"Training complete in {elapsed_train:.1f}s")
+        print(f"  Initial loss : {train_results['initial_loss']:.4f}")
+        print(f"  Final loss   : {train_results['final_loss']:.4f}")
+        print()
+
+    # Persist the trained model so subsequent runs can reuse it.
+    if args.save_checkpoint:
+        save_path = Path(args.save_checkpoint)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), save_path)
+        print(f"Trained G0 model saved to: {save_path}")
 
     # ------------------------------------------------------------------
     # 3. Export trained model to ONNX.
@@ -246,6 +301,9 @@ def main() -> int:
     print(f"  Accuracy (PyTorch) : {eval_result['accuracy_pytorch']:.4f}")
     print(f"  Accuracy (ONNX)    : {eval_result['accuracy_onnx']:.4f}")
     print(f"  Accuracy delta     : {eval_result['accuracy_delta']:.4f}  (threshold: < 0.01)")
+    print(f"  F1 (PyTorch)       : {eval_result['f1_pytorch']:.4f}")
+    print(f"  F1 (ONNX)          : {eval_result['f1_onnx']:.4f}")
+    print(f"  F1 delta           : {eval_result['f1_delta']:.4f}  (threshold: < 0.01)")
     print(f"  Max logit diff     : {eval_result['max_logit_diff']:.6f}")
     print(f"  Mean logit diff    : {eval_result['mean_logit_diff']:.6f}")
     print(f"  Eval pairs         : {eval_result['n_eval_pairs']}")
@@ -298,6 +356,85 @@ def main() -> int:
     with open(output_path, "w") as f:
         json.dump(output_doc, f, indent=2)
     print(f"Results written to: {output_path}")
+
+    # ------------------------------------------------------------------
+    # 6. Emit canonical phase-0 envelope via experiments/_lib harness.
+    # ------------------------------------------------------------------
+    if not args.no_canonical_envelope:
+        try:
+            repo_root = _HERE.parent.parent
+            if str(repo_root) not in sys.path:
+                sys.path.insert(0, str(repo_root))
+            from experiments._lib import (  # noqa: E402
+                ResultEnvelope,
+                capture_run_context,
+                write_result,
+            )
+
+            ctx = capture_run_context(gate="G4", hypothesis="H7.3", seed=args.seed)
+            envelope = ResultEnvelope(
+                gate="G4",
+                hypothesis="H7.3",
+                passed=passed,
+                metrics={
+                    "accuracy_pytorch": eval_result["accuracy_pytorch"],
+                    "accuracy_onnx": eval_result["accuracy_onnx"],
+                    "accuracy_delta": eval_result["accuracy_delta"],
+                    "f1_pytorch": eval_result["f1_pytorch"],
+                    "f1_onnx": eval_result["f1_onnx"],
+                    "f1_delta": eval_result["f1_delta"],
+                    "max_logit_diff": eval_result["max_logit_diff"],
+                    "mean_logit_diff": eval_result["mean_logit_diff"],
+                    "n_eval_pairs": eval_result["n_eval_pairs"],
+                    "pass_threshold_accuracy": eval_result.get(
+                        "pass_threshold_accuracy", 0.01
+                    ),
+                    "pass_threshold_f1": eval_result.get(
+                        "pass_threshold_f1", 0.01
+                    ),
+                    "n_nodes": args.n_nodes,
+                    "n_edges": args.n_edges,
+                    "n_training_steps": args.n_training_steps,
+                    "training_initial_loss": train_results["initial_loss"],
+                    "training_final_loss": train_results["final_loss"],
+                    "training_monotone_decrease": train_results[
+                        "monotone_decrease"
+                    ],
+                    "onnx_model_size_bytes": export_result[
+                        "onnx_model_size_bytes"
+                    ],
+                    "onnx_export_fallback_used": export_result["fallback_used"],
+                    "onnx_validation_passed": export_result[
+                        "validation_passed"
+                    ],
+                    "elapsed_seconds_total": round(
+                        (t1 - t0) + elapsed_train + elapsed_export + elapsed_eval,
+                        2,
+                    ),
+                },
+                runtime=ctx,
+                notes=(
+                    "G4 / H7.3 ONNX losslessness: trained TypedLinkGraphModel "
+                    "(G0 architecture from PR #83) at 10K-block / 1K-step spec, "
+                    "exported to ONNX, then compared PyTorch vs. ONNX on a "
+                    "held-out eval set. Pass criterion: < 1% accuracy delta "
+                    "AND < 1% attribution F1 delta."
+                ),
+                extra={
+                    "legacy_results_path": str(output_path.as_posix()),
+                    "g0_checkpoint_loaded": bool(args.g0_checkpoint),
+                    "g0_checkpoint_path": (
+                        str(args.g0_checkpoint) if args.g0_checkpoint else None
+                    ),
+                },
+            )
+            envelope_path = write_result(envelope, _HERE)
+            print(f"Canonical envelope written to: {envelope_path}")
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"warning: failed to write canonical envelope: {exc}",
+                file=sys.stderr,
+            )
 
     return 0 if passed else 1
 
