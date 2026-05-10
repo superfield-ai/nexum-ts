@@ -108,6 +108,48 @@ export class NullQAScorer implements QAScorer {
 }
 
 /**
+ * Citation-overlap scorer used by the G2 wedge (issue #9).
+ *
+ * Compares the retrieved block-id list against the gold block-id set:
+ *   - citationPrecision = |retrieved ∩ gold| / |retrieved|
+ *   - citationRecall    = |retrieved ∩ gold| / |gold|
+ *   - f1                = harmonic mean of the two
+ *
+ * Exact/F1 over the predicted answer string are not computed here; the G2
+ * wedge runs in retrieval-only mode (no LLM generation), so token-level QA
+ * scores would be misleading. Issue #11 will add `TokenF1Scorer` and
+ * `ExactMatchScorer` once the answer-generation path is wired.
+ */
+export class CitationOverlapScorer implements QAScorer {
+  readonly name = 'citation-overlap'
+  score(example: QAExample, prediction: QAPrediction): QAScore {
+    const gold = new Set(example.goldBlockIds ?? [])
+    const retrieved = prediction.retrievedBlockIds
+    if (gold.size === 0 && retrieved.length === 0) {
+      return {
+        exampleId: example.id,
+        exactMatch: null,
+        f1: null,
+        citationPrecision: null,
+        citationRecall: null,
+      }
+    }
+    let hits = 0
+    for (const id of retrieved) if (gold.has(id)) hits++
+    const precision = retrieved.length === 0 ? 0 : hits / retrieved.length
+    const recall = gold.size === 0 ? 0 : hits / gold.size
+    const f1 = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall)
+    return {
+      exampleId: example.id,
+      exactMatch: null,
+      f1,
+      citationPrecision: precision,
+      citationRecall: recall,
+    }
+  }
+}
+
+/**
  * Aggregate a stream of per-example scores into a report. Defined here so the
  * shape is stable across #9 and #11.
  */
