@@ -21,14 +21,31 @@ test('query route is imported in src/index.ts', () => {
   )
 })
 
-test('query route source contains all four modes', () => {
+test('query route source dispatches the phase-2 public modes (issue #104)', () => {
   const srcPath = path.resolve(__dirname, '../../src/routes/query.ts')
   const contents = fs.readFileSync(srcPath, 'utf8')
 
-  assert.ok(contents.includes("mode === 'semantic'"), "should handle semantic mode")
-  assert.ok(contents.includes("mode === 'fulltext'"), "should handle fulltext mode")
+  // Public contract: vector | graph | hybrid, with `semantic` as a
+  // backward-compat alias for `vector`.
+  assert.ok(contents.includes("mode === 'semantic'"), "should accept semantic alias")
+  assert.ok(contents.includes("mode === 'vector'"), "should handle vector mode")
   assert.ok(contents.includes("mode === 'graph'"), "should handle graph mode")
   assert.ok(contents.includes("mode === 'hybrid'"), "should handle hybrid mode")
+
+  // Deprecated public modes must short-circuit with a 400 instead of being
+  // dispatched to a handler.
+  assert.ok(
+    !contents.includes("mode === 'fulltext'"),
+    "fulltext must no longer be dispatched as a public mode",
+  )
+  assert.ok(
+    !contents.includes("mode === 'edge_semantic'"),
+    "edge_semantic must no longer be dispatched as a public mode",
+  )
+  assert.ok(
+    contents.includes("DEPRECATED_MODES") && contents.includes("'fulltext'") && contents.includes("'edge_semantic'"),
+    "deprecated mode names must be tracked in the rejection set",
+  )
 })
 
 test('graph mode source issues a Cypher query through the AGE adapter (issue #101)', () => {
