@@ -175,8 +175,8 @@ async function fulltextSearch(corpusId: string, queryText: string, limit: number
  *    document}` object the recursive-CTE implementation produced, so
  *    consumers (including hybrid mode) need no changes.
  *
- * The recursive-CTE traversal is intentionally retired here — issue #103
- * removes the now-unused helper code in a follow-up cleanup.
+ * The recursive-CTE traversal was retired in issue #103 — AGE is the only
+ * production graph-read path; no helper code remains for the legacy walk.
  *
  * Parameter inlining
  * ------------------

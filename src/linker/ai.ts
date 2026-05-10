@@ -86,7 +86,10 @@ export async function processAiLinks(versionId: string): Promise<void> {
             ],
       )
 
-      // Dual-write to AGE. No-op when AGE_DATABASE_URL is unset.
+      // Mirror the edge into the AGE graph (the canonical graph store after
+      // the phase-1 cutover, issue #99). AGE is required at boot, so this
+      // call is expected to succeed; transient failures return false and are
+      // logged but do not abort the linker batch.
       await writeAgeEdge({ src: block.id, dst: candidate.id, layer: 'ai', relType, weight: cosineSim })
     }
   }
