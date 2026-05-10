@@ -48,12 +48,22 @@ test('graph mode source issues a Cypher query through the AGE adapter (issue #10
   assert.ok(contents.includes('rel_type'), 'graphSearch result should include rel_type')
 })
 
-test('hybrid mode source performs semantic search then graph expansion', () => {
+test('hybrid mode source performs semantic search then AGE Cypher one-hop expansion', () => {
+  // Issue #102: the recursive-CTE neighbour expansion was replaced by a
+  // single Cypher one-hop through the AGE adapter. The vector-ANN seed step
+  // is unchanged. Keep the public origin tags so clients keep working.
   const srcPath = path.resolve(__dirname, '../../src/routes/query.ts')
   const contents = fs.readFileSync(srcPath, 'utf8')
 
   assert.ok(contents.includes('semanticSearch(corpusId'), 'hybridSearch should call semanticSearch')
-  assert.ok(contents.includes('graphSearch(sr.block_id'), 'hybridSearch should call graphSearch per semantic result')
+  assert.ok(
+    contents.includes('oneHopNeighborsFromAge('),
+    'hybridSearch should expand neighbours through the AGE Cypher one-hop helper',
+  )
+  assert.ok(
+    !contents.match(/hybridSearch[\s\S]*?graphSearch\(sr\.block_id/),
+    'hybridSearch must no longer delegate to the recursive-CTE graphSearch path',
+  )
   assert.ok(contents.includes("origin: 'semantic'"), "hybrid results should tag semantic origin")
   assert.ok(contents.includes("origin: 'graph'"), "hybrid results should tag graph origin")
 })
