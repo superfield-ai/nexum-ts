@@ -2,7 +2,7 @@
 
 ## Overview
 
-Nexum's backend is a single PostgreSQL database serving as both vector store and graph store, fronted by a Rust ingestion pipeline and a query API. The design avoids separate graph databases and vector databases: PostgreSQL with `pgvector`, `pgvector` HNSW indexes, and recursive CTEs handles all three query modes (full-text, semantic, graph traversal) with acceptable performance at legal-corpus scale (tens of millions of blocks).
+Nexum's backend is a single PostgreSQL database serving as both vector store and graph store, fronted by a Rust ingestion pipeline and a query API. The design avoids separate graph databases and vector databases: PostgreSQL with `pgvector` HNSW indexes for semantic search, full-text search via `tsvector`, and Apache AGE Cypher for graph traversal handles all three query modes with acceptable performance at legal-corpus scale (tens of millions of blocks). The phase-1 cutover (issues #98–#103) made AGE the canonical graph store; the relational `links` table remains as the row-of-truth for edge metadata and edge-similarity ANN, but multi-hop graph reads run exclusively through Cypher.
 
 ---
 
@@ -224,26 +224,25 @@ LIMIT 20;
 
 ### Graph Traversal (multi-hop)
 
+After the phase-1 AGE-default cutover (issues #98–#103) graph traversal runs
+through Apache AGE Cypher against the `nexum_links` graph. The pre-cutover
+recursive CTE over the `links` table has been deleted from production code.
+
 ```sql
-WITH RECURSIVE graph AS (
-    -- seed
-    SELECT dst, 1 AS depth, ARRAY[src] AS path, rel_type
-    FROM links
-    WHERE src = $1 AND layer = ANY($2)   -- filter by layer
-
-    UNION ALL
-
-    SELECT l.dst, g.depth + 1, g.path || l.src, l.rel_type
-    FROM links l
-    JOIN graph g ON l.src = g.dst
-    WHERE g.depth < $3                   -- max hops
-      AND l.src != ALL(g.path)           -- cycle guard
-)
-SELECT DISTINCT b.*, g.depth, g.rel_type
-FROM graph g
-JOIN blocks b ON b.id = g.dst
-ORDER BY g.depth;
+SELECT block_id, depth, rel_type
+FROM cypher('nexum_links', $$
+    MATCH p = (a:Block {id: $seed})-[r:LINK*1..$max_hops]->(b:Block)
+    WHERE ALL(rel IN relationships(p) WHERE rel.layer IN [$layers])
+    RETURN b.id AS block_id, length(p) AS depth,
+           last(relationships(p)).rel_type AS rel_type
+$$) AS (block_id agtype, depth agtype, rel_type agtype);
 ```
+
+Block content is hydrated from the relational store (`blocks` JOIN
+`documents`) in a second batched query, keyed by the ids returned above.
+See `src/routes/query.ts::graphSearch` for the production implementation,
+including direction handling, layer/`rel_type` filters, and the
+shortest-path collapse.
 
 ### Version-Aware Queries
 
@@ -423,11 +422,12 @@ parentheses point to the implementation issues.
 
 ## Phase-1 AGE-default cutover seams (issue #98)
 
-A second phase-1 dev-scout pre-stubs three surfaces shared by the four
-follow-on phase-1 implementation issues that cut the codebase from a dual-write
-recursive-CTE posture over to Apache AGE as the default data layer. Nothing
-here implements feature behaviour; each seam exists so the implementation
-issues can develop in parallel against a frozen contract.
+A second phase-1 dev-scout pre-stubbed three surfaces shared by the
+follow-on phase-1 implementation issues that cut the codebase from a
+recursive-CTE posture over to Apache AGE as the default graph layer. The
+seams below are the frozen contract those issues developed against. With
+the cutover landed (#99 boot gate, #100 backfill, #101/#102 query ports,
+#103 helper deletion) the seams are now the production surface.
 
 Cross-references in parentheses point to the implementation issues.
 
@@ -454,9 +454,9 @@ Cross-references in parentheses point to the implementation issues.
 - The `AgeEdgeInput` payload mirrors the shape already accepted by
   `writeAgeEdge` so the structural and AI linker call sites can be swapped
   mechanically.
-- Issues #4 (`graphSearch`) and #5 (`hybridSearch`) will route their Cypher
-  through `client.query()`. Issue #6 will delete the recursive-CTE traversal
-  in favour of the same path.
+- Issues #101 (`graphSearch`) and #102 (`hybridSearch`) ported their
+  traversals to Cypher against `nexum_links`. Issue #103 deleted the
+  recursive-CTE helpers and the dual-write framing that the seams replaced.
 
 ### 3. `backfillLinksToAge()` migrate step (issue #100, shipped)
 
@@ -477,13 +477,12 @@ Cross-references in parentheses point to the implementation issues.
   `migrate()` so operators see partial-state errors instead of a silently
   divergent graph.
 
-### Out of scope for this scout
+### Cutover status
 
-- Removing or rewriting the recursive-CTE traversal (issue #103).
-- Porting `graphSearch` / `hybridSearch` (issues #101, #102).
-
-(The startup hard gate landed in #99; the `links` → AGE backfill landed in
-#100.)
+- Startup hard gate: shipped in #99.
+- `links` → AGE backfill: shipped in #100.
+- `graphSearch` / `hybridSearch` Cypher port: shipped in #101 / #102.
+- Recursive-CTE helper + dual-write cleanup: shipped in #103.
 
 ---
 

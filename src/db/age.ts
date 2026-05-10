@@ -64,8 +64,14 @@ export async function getAgePool(): Promise<pg.Pool> {
 }
 
 /**
- * Dual-write a single edge into AGE. Idempotent: MERGEs both endpoint
+ * Write a single edge into the AGE graph. Idempotent: MERGEs both endpoint
  * vertices and the LINK edge keyed by (src, dst, layer, rel_type).
+ *
+ * The historical "dual-write" framing is gone — AGE is the source of truth
+ * for graph traversal after the phase-1 cutover (#99) and the recursive-CTE
+ * traversal helpers were removed in #103. The linker still inserts a row
+ * into the relational `links` table for edge-similarity ANN, but graph
+ * traversal reads exclusively from AGE.
  *
  * Returns true on success, false on a query error so the caller can decide
  * to retry. Phase-1 makes AGE required at boot, so by the time linker code
@@ -118,16 +124,13 @@ export async function countAgeEdges(): Promise<number> {
 // -----------------------------------------------------------------------------
 // Phase-1 AGE-default cutover seams (issue #98 scout, hardened in #99)
 //
-// The seams below freeze the contracts for the four follow-on phase-1
-// implementation issues:
-//   - #99 (this issue) turns `startupRequireAge()` into a hard fail when AGE
-//     is missing.
-//   - #100 will replace the `backfillLinksToAge()` stub in `db/migrate.ts`
-//     with a real backfill that copies every row of `links` into the
-//     `nexum_links` graph.
-//   - #101 / #102 will route `graphSearch` and `hybridSearch` through the
-//     `CypherGraphClient` interface defined here, allowing the recursive-CTE
-//     traversal in #103 to be deleted in favour of Cypher.
+// The seams below freeze the contracts that the phase-1 cutover landed on:
+//   - #99 turned `startupRequireAge()` into a hard fail when AGE is missing.
+//   - #100 implemented `backfillLinksToAge()` in `db/migrate.ts`, copying
+//     every row of `links` into the `nexum_links` graph.
+//   - #101 / #102 routed `graphSearch` and `hybridSearch` through Cypher.
+//   - #103 deleted the recursive-CTE traversal helpers and the dual-write
+//     framing — AGE is now the only graph-read path in production code.
 //
 // See `docs/engineering.md` for the contract.
 // -----------------------------------------------------------------------------

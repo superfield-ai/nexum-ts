@@ -166,7 +166,7 @@ export async function backfillLinksToAge(): Promise<BackfillLinksToAgeResult> {
  * 1:1 mapping between rows and edges, so the acceptance criterion
  * "AGE edge count == links row count" holds even when two rows happen to
  * share `(src, dst, layer, rel_type)`. Block vertices are still MERGEd so the
- * vertex set converges with the existing dual-write helper (`writeAgeEdge`).
+ * vertex set converges with the runtime edge writer (`writeAgeEdge`).
  *
  * Validation here is strict: malformed UUIDs or unknown layer values throw
  * synchronously so the surrounding `migrate()` call aborts instead of
