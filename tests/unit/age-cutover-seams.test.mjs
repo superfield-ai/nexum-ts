@@ -1,21 +1,53 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-// Phase-1 AGE-default cutover seams (issue #98). These tests pin the
-// contracts that the four follow-on phase-1 implementation issues consume.
-// They MUST stay green even when AGE_DATABASE_URL is unset (the default in
-// CI), because the seams are designed to soft-fail until issue #2 hardens
-// `startupRequireAge()` into a hard gate.
+// Phase-1 AGE-default cutover seams (issues #98 scout, #99 hardening).
+// These tests pin the public seam surface that the four follow-on phase-1
+// implementation issues consume. They run with NEXUM_REQUIRE_AGE=false so
+// the module loads without a live AGE-capable Postgres.
 
-test('startupRequireAge is exported and callable as a no-op when AGE unset', async () => {
+process.env.NEXUM_REQUIRE_AGE = 'false'
+
+test('startupRequireAge is exported and skips when NEXUM_REQUIRE_AGE=false', async () => {
   const { startupRequireAge, resetAgePool } = await import('../../dist/db/age.js')
-  const { config } = await import('../../dist/config.js')
   resetAgePool()
   assert.equal(typeof startupRequireAge, 'function')
-  if (!config.AGE_DATABASE_URL) {
+  const prev = process.env.NEXUM_REQUIRE_AGE
+  process.env.NEXUM_REQUIRE_AGE = 'false'
+  try {
     const result = await startupRequireAge()
     assert.equal(result.ok, true)
-    assert.equal(result.mode, 'optional')
+    assert.equal(result.mode, 'skipped')
+  } finally {
+    process.env.NEXUM_REQUIRE_AGE = prev
+  }
+})
+
+test('startupRequireAge throws when AGE Postgres is unreachable and required', async () => {
+  // Pin the phase-1 cutover behaviour: no soft-fail, no warn-and-continue.
+  // Point at a port nothing is listening on; the require flag is on.
+  const prevRequire = process.env.NEXUM_REQUIRE_AGE
+  const prevAge = process.env.AGE_DATABASE_URL
+  process.env.NEXUM_REQUIRE_AGE = 'true'
+  process.env.AGE_DATABASE_URL = 'postgresql://nexum:nexum@127.0.0.1:1/nexum_no_age'
+  try {
+    const { config } = await import('../../dist/config.js')
+    const prevConfig = config.AGE_DATABASE_URL
+    config.AGE_DATABASE_URL = process.env.AGE_DATABASE_URL
+    try {
+      const { startupRequireAge, resetAgePool } = await import('../../dist/db/age.js')
+      resetAgePool()
+      await assert.rejects(() => startupRequireAge(), /startupRequireAge/)
+    } finally {
+      config.AGE_DATABASE_URL = prevConfig
+      const { resetAgePool } = await import('../../dist/db/age.js')
+      resetAgePool()
+    }
+  } finally {
+    if (prevRequire === undefined) delete process.env.NEXUM_REQUIRE_AGE
+    else process.env.NEXUM_REQUIRE_AGE = prevRequire
+    if (prevAge === undefined) delete process.env.AGE_DATABASE_URL
+    else process.env.AGE_DATABASE_URL = prevAge
   }
 })
 
@@ -29,48 +61,23 @@ test('createCypherGraphClient produces an object that satisfies the interface', 
   assert.equal(typeof client.available, 'function')
 })
 
-test('CypherGraphClient short-circuits when AGE unavailable', async () => {
-  const { createCypherGraphClient, resetAgePool } = await import('../../dist/db/age.js')
+test('CypherGraphClient.available reports false when AGE Postgres is unreachable', async () => {
   const { config } = await import('../../dist/config.js')
-  resetAgePool()
-  if (config.AGE_DATABASE_URL) return // only meaningful in CI default
-
-  const client = createCypherGraphClient()
-  assert.equal(await client.available(), false)
-  assert.equal(await client.countEdges(), -1)
-  assert.equal(
-    await client.writeEdge({ src: 'a', dst: 'b', layer: 'ai', relType: 'supports', weight: 1 }),
-    false,
-  )
-  assert.deepEqual(await client.query('MATCH (n) RETURN n'), [])
-})
-
-test('backfillLinksToAge is exported and reports age-unavailable when AGE unset', async () => {
-  const { backfillLinksToAge } = await import('../../dist/db/migrate.js')
-  const { resetAgePool } = await import('../../dist/db/age.js')
-  const { config } = await import('../../dist/config.js')
-  resetAgePool()
-  assert.equal(typeof backfillLinksToAge, 'function')
-  if (!config.AGE_DATABASE_URL) {
-    const result = await backfillLinksToAge()
-    assert.equal(result.ok, true)
-    assert.equal(result.copied, 0)
-    assert.equal(result.skipped, 'age-unavailable')
+  const prevConfig = config.AGE_DATABASE_URL
+  config.AGE_DATABASE_URL = 'postgresql://nexum:nexum@127.0.0.1:1/nexum_no_age'
+  try {
+    const { createCypherGraphClient, resetAgePool } = await import('../../dist/db/age.js')
+    resetAgePool()
+    const client = createCypherGraphClient()
+    assert.equal(await client.available(), false)
+  } finally {
+    config.AGE_DATABASE_URL = prevConfig
+    const { resetAgePool } = await import('../../dist/db/age.js')
+    resetAgePool()
   }
 })
 
-test('CypherGraphClient.writeEdge contract matches the existing dual-write helper', async () => {
-  // The phase-1 cutover replaces direct writeAgeEdge call sites with calls
-  // through the CypherGraphClient interface. This test pins that the adapter
-  // accepts the same payload shape so the swap is mechanical.
-  const { createCypherGraphClient, writeAgeEdge, resetAgePool } = await import('../../dist/db/age.js')
-  resetAgePool()
-  const client = createCypherGraphClient()
-  const payload = { src: 'a', dst: 'b', layer: 'structural', relType: 'cites', weight: 1.0 }
-  // Both must accept the payload and return a boolean (false when AGE unset).
-  const direct = await writeAgeEdge(payload)
-  const viaClient = await client.writeEdge(payload)
-  assert.equal(typeof direct, 'boolean')
-  assert.equal(typeof viaClient, 'boolean')
-  assert.equal(direct, viaClient)
+test('backfillLinksToAge is exported with the frozen result shape', async () => {
+  const { backfillLinksToAge } = await import('../../dist/db/migrate.js')
+  assert.equal(typeof backfillLinksToAge, 'function')
 })

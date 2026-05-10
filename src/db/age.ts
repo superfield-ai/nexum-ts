@@ -1,18 +1,20 @@
 /**
- * Apache AGE companion-pool helper (issue #75).
+ * Apache AGE pool + Cypher seam (issues #75, #98, #99).
  *
- * Phase-2 deliverable. The Phase-1 scout (#78) provisioned the AGE container
- * and the `nexum_links` graph; this module is the runtime seam through which
- * the linker dual-writes typed edges into AGE.
+ * Phase-1 cutover (issue #99) made Apache AGE a hard runtime requirement.
+ * The supported deployment is the unified `apache/age:PG16_latest` image,
+ * so AGE lives on the same Postgres instance as the primary `DATABASE_URL`.
+ * `AGE_DATABASE_URL` remains a config knob purely so an operator can point
+ * AGE traffic at a separate Postgres if they ever want to; when unset the
+ * primary `DATABASE_URL` is used.
  *
  * Design intent
  * -------------
- * - **Optional dependency.** If `AGE_DATABASE_URL` is unset OR the connection
- *   fails OR the AGE extension is unavailable on the target server, every
- *   helper here becomes a silent no-op. The linker keeps writing to the
- *   primary `links` table and the system stays healthy. This lets the same
- *   image run in environments where AGE is not yet provisioned (CI smoke
- *   tests, local pgvector-only setups) without raising errors.
+ * - **Required at boot.** `startupRequireAge()` probes the configured
+ *   Postgres for the `age` extension and throws when it is missing. There is
+ *   no soft-fail / optional-companion fallback. Set `NEXUM_REQUIRE_AGE=false`
+ *   only for unit tests that need this module loaded without an AGE server
+ *   present.
  * - **Lazy.** The pool is created on first use, not at import time.
  * - **Pooled, not per-call.** `pg.Pool` reuse keeps Cypher latency in line
  *   with regular Postgres queries (single round-trip per `cypher(...)` call).
@@ -20,31 +22,35 @@
  *   on the search path before any `cypher(...)` call.
  *
  * See `db/migrations/0001_age_shim.sql` for graph/label provisioning and
- * `docs/engineering.md` (Phase-1 Scout Seams) for the seam contract.
+ * `docs/engineering.md` (Phase-1 AGE-default cutover) for the contract.
  */
 
 import pg from 'pg'
 import { config } from '../config.js'
 
 let agePool: pg.Pool | null = null
-let ageDisabled = false
+
+/**
+ * Resolve the Postgres URL the AGE pool should connect to. Defaults to the
+ * primary `DATABASE_URL` since the unified `apache/age:PG16_latest` image
+ * exposes pgvector and AGE on the same instance.
+ */
+function ageConnectionUrl(): string {
+  return config.AGE_DATABASE_URL || config.DATABASE_URL
+}
 
 export function resetAgePool(): void {
   agePool = null
-  ageDisabled = false
 }
 
 /**
- * Returns a configured AGE pool, or `null` if AGE is not available.
- * The first call probes the server for the `age` extension; if missing,
- * subsequent calls short-circuit to `null`.
+ * Returns a configured AGE pool. The pool is created lazily on first use.
+ * Connection failures surface to the caller; there is no soft-fail path.
  */
-export async function getAgePool(): Promise<pg.Pool | null> {
-  if (ageDisabled) return null
-  if (!config.AGE_DATABASE_URL) return null
+export async function getAgePool(): Promise<pg.Pool> {
   if (agePool) return agePool
 
-  const candidate = new pg.Pool({ connectionString: config.AGE_DATABASE_URL })
+  const candidate = new pg.Pool({ connectionString: ageConnectionUrl() })
   // Configure search_path on every fresh connection so cypher(...) resolves.
   candidate.on('connect', (client) => {
     client.query("LOAD 'age'; SET search_path = ag_catalog, \"$user\", public").catch(() => {
@@ -52,24 +58,6 @@ export async function getAgePool(): Promise<pg.Pool | null> {
       // will surface the error. We don't tear down the whole pool here.
     })
   })
-
-  try {
-    const client = await candidate.connect()
-    try {
-      const { rows } = await client.query("SELECT 1 FROM pg_extension WHERE extname = 'age'")
-      if (rows.length === 0) {
-        ageDisabled = true
-        await candidate.end().catch(() => {})
-        return null
-      }
-    } finally {
-      client.release()
-    }
-  } catch {
-    ageDisabled = true
-    await candidate.end().catch(() => {})
-    return null
-  }
 
   agePool = candidate
   return agePool
@@ -79,8 +67,10 @@ export async function getAgePool(): Promise<pg.Pool | null> {
  * Dual-write a single edge into AGE. Idempotent: MERGEs both endpoint
  * vertices and the LINK edge keyed by (src, dst, layer, rel_type).
  *
- * On any failure, logs to stderr and returns false. The primary `links`
- * row is the source of truth; AGE is a parallel index during phase-2.
+ * Returns true on success, false on a query error so the caller can decide
+ * to retry. Phase-1 makes AGE required at boot, so by the time linker code
+ * runs the pool MUST be usable; a write failure here indicates a transient
+ * fault, not a missing-AGE configuration.
  */
 export async function writeAgeEdge(args: {
   src: string
@@ -90,7 +80,6 @@ export async function writeAgeEdge(args: {
   weight: number
 }): Promise<boolean> {
   const pool = await getAgePool()
-  if (!pool) return false
 
   const { src, dst, layer, relType, weight } = args
   // Cypher inside AGE: parameters are NOT supported by cypher(...) directly,
@@ -108,52 +97,45 @@ export async function writeAgeEdge(args: {
     await pool.query(`SELECT * FROM cypher('nexum_links', $$ ${cypher} $$) AS (v agtype)`)
     return true
   } catch (err) {
-    console.error('age dual-write failed', (err as Error).message)
+    console.error('age write failed', (err as Error).message)
     return false
   }
 }
 
 /**
  * Count LINK edges currently stored in AGE (used by tests).
- * Returns -1 when AGE is unavailable.
+ * Returns 0 when the graph is empty; throws on connection errors.
  */
 export async function countAgeEdges(): Promise<number> {
   const pool = await getAgePool()
-  if (!pool) return -1
-  try {
-    const { rows } = await pool.query(
-      `SELECT * FROM cypher('nexum_links', $$ MATCH ()-[r:LINK]->() RETURN count(r) $$) AS (n agtype)`,
-    )
-    if (rows.length === 0) return 0
-    return parseInt(String(rows[0].n).replace(/[^0-9]/g, ''), 10) || 0
-  } catch {
-    return -1
-  }
+  const { rows } = await pool.query(
+    `SELECT * FROM cypher('nexum_links', $$ MATCH ()-[r:LINK]->() RETURN count(r) $$) AS (n agtype)`,
+  )
+  if (rows.length === 0) return 0
+  return parseInt(String(rows[0].n).replace(/[^0-9]/g, ''), 10) || 0
 }
 
 // -----------------------------------------------------------------------------
-// Phase-1 AGE-default cutover seams (issue #98)
+// Phase-1 AGE-default cutover seams (issue #98 scout, hardened in #99)
 //
-// The seams below freeze the contracts that the four follow-on phase-1
-// implementation issues will fill in:
-//   - #2 will turn `startupRequireAge()` into a hard fail when AGE is missing.
-//   - #3 will replace the `backfillLinksToAge()` stub in `db/migrate.ts` with a
-//     real backfill that copies every row of `links` into the `nexum_links`
-//     graph.
-//   - #4 / #5 will route `graphSearch` and `hybridSearch` through the
+// The seams below freeze the contracts for the four follow-on phase-1
+// implementation issues:
+//   - #99 (this issue) turns `startupRequireAge()` into a hard fail when AGE
+//     is missing.
+//   - #100 will replace the `backfillLinksToAge()` stub in `db/migrate.ts`
+//     with a real backfill that copies every row of `links` into the
+//     `nexum_links` graph.
+//   - #101 / #102 will route `graphSearch` and `hybridSearch` through the
 //     `CypherGraphClient` interface defined here, allowing the recursive-CTE
-//     traversal in #6 to be deleted in favour of Cypher.
+//     traversal in #103 to be deleted in favour of Cypher.
 //
-// None of those issues exist as code yet; this scout exists ONLY so they can
-// land in parallel against frozen names and signatures. See the
-// `Phase-1 AGE-default cutover seams (issue #98)` section in
-// `docs/engineering.md` for the contract.
+// See `docs/engineering.md` for the contract.
 // -----------------------------------------------------------------------------
 
 /**
  * Edge payload accepted by `CypherGraphClient.writeEdge`. Mirrors the shape
- * already consumed by `writeAgeEdge` so the soft-fail dual-write code can be
- * adapted into this interface without a behaviour change.
+ * already consumed by `writeAgeEdge` so call sites can swap onto the
+ * interface without a behaviour change.
  */
 export interface AgeEdgeInput {
   src: string
@@ -164,25 +146,18 @@ export interface AgeEdgeInput {
 }
 
 /**
- * Cypher graph client seam (issue #98). The phase-1 cutover replaces the
- * recursive-CTE traversal with Cypher queries against AGE; everything that
- * touches the graph from then on goes through this interface so the
- * implementation can swap (real AGE vs. test fake) without leaking pg into
- * call sites.
+ * Cypher graph client seam (issue #98). Everything that touches the graph
+ * goes through this interface so the implementation can swap (real AGE vs.
+ * test fake) without leaking pg into call sites.
  *
  * Phase-1 contract (frozen):
- *  - `writeEdge(edge)` — idempotent dual-write of one LINK edge.
- *    Returns `true` on success, `false` when AGE is unavailable or the write
- *    failed. Callers MUST tolerate `false` during phase-1; phase-2 (issue #2)
- *    flips this into a hard failure.
- *  - `countEdges()` — total LINK edges in the `nexum_links` graph, or `-1`
- *    when AGE is unavailable. Used by tests and observability.
- *  - `query<T>(cypher)` — execute an arbitrary Cypher statement and return the
- *    raw `agtype` rows. Returns `[]` when AGE is unavailable. Used by the
- *    forthcoming `graphSearch` / `hybridSearch` ports (issues #4 / #5).
- *  - `available()` — `true` iff `AGE_DATABASE_URL` is set AND the AGE
- *    extension is present on the target server. Used by `startupRequireAge()`
- *    and by callers that need to branch before issuing Cypher.
+ *  - `writeEdge(edge)` — idempotent write of one LINK edge. Returns true on
+ *    success, false on a transient query error.
+ *  - `countEdges()` — total LINK edges in the `nexum_links` graph.
+ *  - `query<T>(cypher)` — execute an arbitrary Cypher statement and return
+ *    the raw `agtype` rows.
+ *  - `available()` — true iff the AGE pool can connect and the `age`
+ *    extension is loaded. Used by `startupRequireAge()` and by tests.
  */
 export interface CypherGraphClient {
   writeEdge(edge: AgeEdgeInput): Promise<boolean>
@@ -192,11 +167,8 @@ export interface CypherGraphClient {
 }
 
 /**
- * Adapt the existing soft-fail dual-write helpers into the phase-1
- * `CypherGraphClient` interface. The returned client is a thin wrapper —
- * no new state, no new connections — so swapping call sites onto the
- * interface is observably a no-op until the phase-1 implementation issues
- * land.
+ * Build a CypherGraphClient backed by the runtime AGE pool. The returned
+ * client is a thin wrapper — no new state, no new connections.
  */
 export function createCypherGraphClient(): CypherGraphClient {
   return {
@@ -204,7 +176,6 @@ export function createCypherGraphClient(): CypherGraphClient {
     countEdges: () => countAgeEdges(),
     async query<T = unknown>(cypher: string): Promise<T[]> {
       const pool = await getAgePool()
-      if (!pool) return []
       try {
         const { rows } = await pool.query(
           `SELECT * FROM cypher('nexum_links', $$ ${cypher} $$) AS (v agtype)`,
@@ -216,43 +187,68 @@ export function createCypherGraphClient(): CypherGraphClient {
       }
     },
     async available() {
-      return (await getAgePool()) !== null
+      try {
+        const pool = await getAgePool()
+        const { rows } = await pool.query(
+          "SELECT 1 FROM pg_extension WHERE extname = 'age'",
+        )
+        return rows.length > 0
+      } catch {
+        return false
+      }
     },
   }
 }
 
 /**
- * Result of the boot-time AGE gate. `mode: 'required'` means AGE was probed
- * and present; `mode: 'optional'` means AGE_DATABASE_URL was unset and the
- * server is allowed to come up without graph storage; `mode: 'unavailable'`
- * means AGE_DATABASE_URL was set but the extension or connection failed.
+ * Result of the boot-time AGE gate. After the phase-1 cutover only
+ * `mode: 'required'` is reachable on a successful boot; any other state
+ * causes `startupRequireAge()` to throw.
  */
 export interface StartupRequireAgeResult {
   ok: boolean
-  mode: 'required' | 'optional' | 'unavailable'
+  mode: 'required' | 'skipped'
   reason?: string
 }
 
 /**
- * Boot-time hook (issue #98 scout). Today this is a no-op probe that reports
- * whether AGE is available; it does NOT block startup under any condition.
+ * Boot-time hard gate (issue #99). Probes the configured Postgres for the
+ * `age` extension and throws when it is missing, refusing to bring up a
+ * server against a database that cannot serve graph queries.
  *
- * Issue #2 will flip this into a hard gate: when `NEXUM_REQUIRE_AGE=true`
- * (the phase-1 default), an `unavailable` result will throw and the server
- * will refuse to start. The signature is frozen now so that #2 is a
- * behaviour change, not a refactor.
+ * Set `NEXUM_REQUIRE_AGE=false` only for unit tests that need to import
+ * this module without a running AGE-capable Postgres. In every real
+ * environment the flag stays at its default (true) and AGE is required.
  */
 export async function startupRequireAge(): Promise<StartupRequireAgeResult> {
-  if (!config.AGE_DATABASE_URL) {
-    return { ok: true, mode: 'optional', reason: 'AGE_DATABASE_URL unset' }
+  const required = process.env.NEXUM_REQUIRE_AGE !== 'false'
+  if (!required) {
+    return { ok: true, mode: 'skipped', reason: 'NEXUM_REQUIRE_AGE=false' }
   }
-  const pool = await getAgePool()
-  if (!pool) {
-    // Today: warn and continue. Phase-1 cutover (#2) will throw here.
-    console.warn(
-      'startupRequireAge: AGE_DATABASE_URL set but extension unavailable; continuing in soft-fail mode (phase-1 cutover will harden this)',
+  let pool: pg.Pool
+  try {
+    pool = await getAgePool()
+  } catch (err) {
+    throw new Error(
+      `startupRequireAge: failed to connect to AGE Postgres at ${ageConnectionUrl()}: ${(err as Error).message}. ` +
+        `Phase-1 requires apache/age:PG16_latest. Set NEXUM_REQUIRE_AGE=false only for unit tests.`,
     )
-    return { ok: true, mode: 'unavailable', reason: 'AGE extension not present' }
+  }
+  let rows: unknown[]
+  try {
+    const result = await pool.query("SELECT 1 FROM pg_extension WHERE extname = 'age'")
+    rows = result.rows
+  } catch (err) {
+    throw new Error(
+      `startupRequireAge: failed to probe AGE extension: ${(err as Error).message}`,
+    )
+  }
+  if (rows.length === 0) {
+    throw new Error(
+      `startupRequireAge: AGE extension not installed on ${ageConnectionUrl()}. ` +
+        `Phase-1 requires apache/age:PG16_latest as the Postgres image. ` +
+        `Set NEXUM_REQUIRE_AGE=false only for unit tests.`,
+    )
   }
   return { ok: true, mode: 'required' }
 }

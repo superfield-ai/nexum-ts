@@ -388,14 +388,13 @@ parentheses point to the implementation issues.
 
 ### 1. AGE migration shim (#75 owns the implementation; #6 consumes it)
 
-- `docker-compose.yml` runs a second Postgres instance, `postgres-age`, on
-  port 5433 using `apache/age:PG16_latest`. The primary `postgres` service
-  (pgvector) is unchanged.
+- `docker-compose.yml` exposes a single Postgres service on port 5432 using
+  `apache/age:PG16_latest` (issue #99 cutover). The image bundles the AGE
+  extension; pgvector is loaded on top via the schema migration.
 - `db/migrations/0001_age_shim.sql` is mounted into
-  `/docker-entrypoint-initdb.d` of `postgres-age` and creates the AGE
-  extension, a graph called `nexum_links`, and stub `Block` / `LINK` labels.
-  It is guarded by `pg_available_extensions` so it is safe to run against any
-  Postgres.
+  `/docker-entrypoint-initdb.d` and creates the AGE extension, a graph
+  called `nexum_links`, and stub `Block` / `LINK` labels. It is guarded by
+  `pg_available_extensions` so it remains safe to re-run.
 - `db/schema.sql` adds `links.edge_embedding vector(384)` (nullable, no
   default). No code reads or writes it yet; #75 will populate it in the new
   edge-embedding ingest stage.
@@ -432,26 +431,26 @@ issues can develop in parallel against a frozen contract.
 
 Cross-references in parentheses point to the implementation issues.
 
-### 1. `startupRequireAge()` boot hook (#2 owns the implementation)
+### 1. `startupRequireAge()` boot hook (hardened by issue #99)
 
 - `src/db/age.ts` exports `startupRequireAge(): Promise<StartupRequireAgeResult>`.
 - `src/index.ts` invokes it after `migrate()` and before `server.listen()`.
-- Today the hook is a non-blocking probe that returns `{ ok, mode, reason }`
-  where `mode` is one of `optional` (AGE_DATABASE_URL unset),
-  `unavailable` (set but extension missing — logs a warning),
-  or `required` (AGE present and probed).
-- Issue #2 will flip `mode: 'unavailable'` into a thrown error so the server
-  refuses to boot when AGE is missing. The signature is frozen now so #2 is
-  a behaviour change, not a refactor.
+- Phase-1 cutover (#99) made this a hard gate: it probes the configured
+  Postgres for the `age` extension and throws when missing. The soft-fail
+  / `optional` / `unavailable` branches were deleted; on a successful boot
+  the only reachable mode is `required`. `NEXUM_REQUIRE_AGE=false` is
+  reserved for unit tests that need the module loaded without an AGE
+  Postgres present (mode `skipped`).
+- The supported runtime image is `apache/age:PG16_latest`, which the only
+  Postgres service in `docker-compose.yml` now uses.
 
 ### 2. `CypherGraphClient` interface (#4 / #5 / #6 consume it)
 
 - `src/db/age.ts` exports the `CypherGraphClient` interface with four methods:
   `writeEdge(edge)`, `countEdges()`, `query<T>(cypher)`, `available()`.
-- `createCypherGraphClient()` returns a thin adapter over the existing
-  soft-fail `writeAgeEdge` / `countAgeEdges` helpers, so swapping a call site
-  onto the interface is observably a no-op until the implementation issues
-  land.
+- `createCypherGraphClient()` returns a thin adapter over the runtime
+  `writeAgeEdge` / `countAgeEdges` helpers, so swapping a call site onto
+  the interface is observably a no-op until the implementation issues land.
 - The `AgeEdgeInput` payload mirrors the shape already accepted by
   `writeAgeEdge` so the structural and AI linker call sites can be swapped
   mechanically.
@@ -480,10 +479,11 @@ Cross-references in parentheses point to the implementation issues.
 
 ### Out of scope for this scout
 
-- Removing or rewriting the recursive-CTE traversal (issue #6).
-- Actually requiring AGE at startup (issue #2).
-- Actually backfilling rows (issue #100, now shipped).
-- Porting `graphSearch` / `hybridSearch` (issues #4, #5).
+- Removing or rewriting the recursive-CTE traversal (issue #103).
+- Porting `graphSearch` / `hybridSearch` (issues #101, #102).
+
+(The startup hard gate landed in #99; the `links` → AGE backfill landed in
+#100.)
 
 ---
 

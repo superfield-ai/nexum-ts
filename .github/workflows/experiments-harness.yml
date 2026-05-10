@@ -6,20 +6,26 @@ on:
       - 'experiments/**'
       - 'scripts/update-hypothesis-status.sh'
       - 'scripts/lint-phase2-inference-client.mjs'
+      - 'scripts/lint-phase1-age-cutover.mjs'
       - 'docs/research/methodology.md'
       - 'docs/research/hypotheses/**'
       - 'src/inference/**'
+      - 'src/db/age.ts'
       - 'docker/Dockerfile.gpu'
+      - 'docker-compose.yml'
       - '.github/workflows/experiments-harness.yml'
   pull_request:
     paths:
       - 'experiments/**'
       - 'scripts/update-hypothesis-status.sh'
       - 'scripts/lint-phase2-inference-client.mjs'
+      - 'scripts/lint-phase1-age-cutover.mjs'
       - 'docs/research/methodology.md'
       - 'docs/research/hypotheses/**'
       - 'src/inference/**'
+      - 'src/db/age.ts'
       - 'docker/Dockerfile.gpu'
+      - 'docker-compose.yml'
       - '.github/workflows/experiments-harness.yml'
 
 jobs:
@@ -94,6 +100,9 @@ jobs:
 
       - name: Phase-2 inference-client import lint
         run: node scripts/lint-phase2-inference-client.mjs
+
+      - name: Phase-1 AGE-default cutover lint
+        run: node scripts/lint-phase1-age-cutover.mjs
 
       - name: GPU Dockerfile spec exists
         run: test -f docker/Dockerfile.gpu

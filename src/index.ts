@@ -12,8 +12,9 @@ import './routes/openapi.js'
 
 await migrate()
 
-// Phase-1 AGE-default cutover seam (issue #98). No-op probe today; issue #2
-// will turn this into a hard gate that refuses to boot when AGE is missing.
+// Phase-1 AGE-default cutover (issues #98 scout, #99 hardening). Hard gate:
+// throws when the configured Postgres lacks the AGE extension, refusing to
+// serve traffic against a database that cannot answer graph queries.
 await startupRequireAge()
 
 const server = createApp()
