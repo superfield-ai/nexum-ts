@@ -547,3 +547,72 @@ without code changes:
   function but does NOT import from `src/inference/client.ts`. The lint is
   a no-op while those experiment dirs are stub-only and exists so that the
   first real implementation lands behind the shared interface.
+
+## Phase-3 InferenceClient default seams (issue #114)
+
+The phase-3 dev-scout (#114) freezes the surface that #105/#106/#107/#108 plug
+into so those four issues can develop in parallel without touching each
+other's files. Nothing here changes runtime behaviour: every concrete client
+ships as a "throws not-yet-implemented" stub; the existing AI linker keeps
+running the inline `classifyPair` heuristic. The seams are:
+
+### 1. `InferenceClient.classifyLink` (interface extension)
+
+- `src/inference/client.ts` now exposes `classifyLink({ contentA, contentB,
+  cosineSim }) → Promise<string | null>` on the `InferenceClient` interface,
+  alongside the existing `embed`, `retrieve`, `score` methods. The return
+  string is a `SIGNALS` key from `src/linker/ai.ts` (e.g. `'supports'`,
+  `'contradicts'`); `null` means "no link".
+- `StubInferenceClient.classifyLink` rejects loudly. #106 ports the linker's
+  hot loop from `classifyPair` to `getDefaultInferenceClient().classifyLink`.
+
+### 2. `LocalCpuInferenceClient` default backend (#105)
+
+- `src/inference/local-cpu.ts` exports `LocalCpuInferenceClient`
+  implementing the full `InferenceClient` surface; every method throws.
+- Architecture constraint A4 (out-of-the-box default) and OD1 (opinionated
+  defaults) require a CPU-friendly local model as the default so a fresh
+  clone runs without API keys. #105 fills the methods using
+  `@xenova/transformers` (already a dependency) — likely
+  `Xenova/all-MiniLM-L6-v2` for embeddings.
+- The class signature (constructor config, method signatures) is FROZEN by
+  this scout. Widening or narrowing happens by editing
+  `src/inference/client.ts` first so the lint catches drift.
+
+### 3. Default-binding hook: `getDefaultInferenceClient()`
+
+- `src/inference/index.ts` exports `getDefaultInferenceClient()`,
+  `setDefaultInferenceClient(client)`, and `resetDefaultInferenceClient()`.
+  The factory is memoised; the first resolution wins for the lifetime of
+  the process.
+- Selection consults `process.env.NEXUM_INFERENCE_BACKEND`:
+    * `'stub'`       (today's `PHASE3_DEFAULT_BACKEND`) — returns
+      `StubInferenceClient`. Preserves "no behaviour change" for #114.
+    * `'local-cpu'`  — returns `LocalCpuInferenceClient`. #105 flips the
+      `PHASE3_DEFAULT_BACKEND` constant once the real backend ships.
+    * `'anthropic'` / `'openai'` — opt-in hosted-provider adapters
+      (filled in by #108).
+  Unknown values fall back to the default with one stderr warning.
+- `src/linker/ai.ts` imports the hook and resolves the client at module
+  init (`export const defaultInferenceClient = getDefaultInferenceClient()`).
+  The hot loop still calls `classifyPair`; #106 swaps it to
+  `defaultInferenceClient.classifyLink(...)`.
+
+### 4. Hosted-provider adapter directory (#108)
+
+- `src/inference/adapters/anthropic.ts` exports
+  `AnthropicInferenceClient`; `src/inference/adapters/openai.ts` exports
+  `OpenAiInferenceClient`. Both implement `InferenceClient` and throw on
+  every method.
+- API keys are read from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` by the
+  real implementations. Embedding and retrieval likely delegate to the
+  local-CPU client (Anthropic ships no first-party embeddings API);
+  `classifyLink` and `score` go to the hosted model. #108 fills the
+  adapters in.
+
+### 5. Lint glob extension marker (#107)
+
+- `scripts/lint-phase2-inference-client.mjs` carries a `TODO(#107)` comment
+  on the `PHASE2_AREAS` constant. #107 broadens the glob from
+  `experiments/area*` to all of `src/` so production code paths are held to
+  the same seam discipline. Behaviour is unchanged in #114.

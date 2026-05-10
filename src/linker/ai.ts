@@ -4,6 +4,14 @@ import { randomUUID } from 'node:crypto'
 import { embedEdge } from './edge-embed.js'
 import { writeAgeEdge } from '../db/age.js'
 import { timeStage } from '../ingest/timing.js'
+// Phase-3 dev-scout (issue #114): bind through the default `InferenceClient`
+// hook so issue #106 can swap in the LocalCpuInferenceClient classification
+// path without touching this file. Today the default backend is the loud
+// stub, so we deliberately do NOT call it from the live link loop yet — the
+// import alone fixes the seam and lets the lint (`scripts/
+// lint-phase2-inference-client.mjs`, broadened in #107) see this module on
+// the inference-client path.
+import { getDefaultInferenceClient } from '../inference/index.js'
 
 export const SIGNALS: Record<string, string[]> = {
   contradicts:      ['not ', 'however', 'contrary', 'but ', 'instead', 'unlike', 'disagrees', 'conflicts'],
@@ -21,6 +29,18 @@ export function classifyPair(contentA: string, contentB: string, cosineSim: numb
   }
   return cosineSim > 0.85 ? 'supports' : null
 }
+
+/**
+ * Phase-3 dev-scout (issue #114): default-binding hook usage.
+ *
+ * Resolve (and memoise) the default `InferenceClient` so that the seam is
+ * actively touched by the linker. Issue #106 ports the hot loop in
+ * `processAiLinks` from the inline `classifyPair` heuristic to
+ * `defaultInferenceClient.classifyLink(...)`. While the default backend is
+ * still the loud stub (Phase 3, pre-#105), no call site invokes the stub —
+ * resolving the client is side-effect-free.
+ */
+export const defaultInferenceClient = getDefaultInferenceClient()
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)) }
 
