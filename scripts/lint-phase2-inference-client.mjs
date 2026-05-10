@@ -29,6 +29,13 @@ const repoRoot = path.resolve(__dirname, '..')
 
 // Experiment directories whose TypeScript entries are required to consume
 // the shared inference-client interface.
+//
+// TODO(#107, phase-3 dev-scout #114): broaden this glob from
+// `experiments/area*` to all of `src/` so that production code paths
+// (notably `src/linker/`, `src/embed/`, and any future inference call site)
+// are held to the same seam discipline as the experiment areas. The lint
+// behaviour stays unchanged for now; #107 flips the glob and adds the
+// allowed-file exceptions.
 const PHASE2_AREAS = [
   'experiments/area2-training-curriculum',
   'experiments/area3-retrieval-inference',

@@ -82,6 +82,22 @@ export interface EvidenceScore {
  * concurrency-safe (e.g. an in-process ORT session) should wrap themselves
  * in a queue and document the effective fan-out in `meta`.
  */
+/**
+ * Phase-3 (issue #114) addition: typed surface for AI-link classification.
+ *
+ * The AI linker (`src/linker/ai.ts`, ported to this seam in #106) emits a
+ * relation-type label between two candidate blocks given their content and a
+ * cosine-similarity prior. The string returned MUST match one of the keys in
+ * `SIGNALS` (e.g. `'supports' | 'contradicts' | 'elaborates' | …`); a `null`
+ * return means "no link". Backends MAY widen the label set, but downstream
+ * consumers only act on labels they recognise.
+ */
+export interface ClassifyLinkInput {
+  contentA: string
+  contentB: string
+  cosineSim: number
+}
+
 export interface InferenceClient {
   readonly name: string
 
@@ -105,6 +121,18 @@ export interface InferenceClient {
    * weights. Order of returned scores MUST match the input order.
    */
   score(query: string, evidence: RetrievedBlock[]): Promise<EvidenceScore[]>
+
+  /**
+   * Classify the relation between two candidate blocks. Returns the relation
+   * label (one of the `SIGNALS` keys in `src/linker/ai.ts`) or `null` if no
+   * link should be produced.
+   *
+   * Phase-3 seam (#114): the existing `classifyPair` heuristic in
+   * `src/linker/ai.ts` is the de-facto default until #106 ports the linker
+   * onto this method. The synchronous heuristic can wrap itself in
+   * `Promise.resolve` to satisfy the signature.
+   */
+  classifyLink(input: ClassifyLinkInput): Promise<string | null>
 }
 
 /**
@@ -139,6 +167,15 @@ export class StubInferenceClient implements InferenceClient {
       new Error(
         'StubInferenceClient.score() is a phase-2 scout stub; wire a real ' +
           'InferenceClient (see issues #10 / #14) before calling.',
+      ),
+    )
+  }
+
+  classifyLink(_input: ClassifyLinkInput): Promise<string | null> {
+    return Promise.reject(
+      new Error(
+        'StubInferenceClient.classifyLink() is a scout stub; wire a real ' +
+          'InferenceClient (see issues #105 / #106) before calling.',
       ),
     )
   }
