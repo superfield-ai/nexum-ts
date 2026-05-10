@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { NullQAScorer, aggregate } = await import('../../dist/eval/harness.js')
+const { NullQAScorer, CitationOverlapScorer, aggregate } = await import('../../dist/eval/harness.js')
 
 test('NullQAScorer returns null dimensions', async () => {
   const s = new NullQAScorer()
@@ -30,6 +30,29 @@ test('aggregate returns null means when all scores are null', () => {
   assert.equal(report.exampleCount, 2)
   assert.equal(report.meanExactMatch, null)
   assert.equal(report.meanF1, null)
+})
+
+test('CitationOverlapScorer scores precision/recall/F1 vs gold block set', () => {
+  const scorer = new CitationOverlapScorer()
+  // gold = {b1, b2}; retrieved = [b1, b3, b4] → hits=1 → P=1/3, R=1/2, F1=0.4
+  const score = scorer.score(
+    { id: 'q1', question: 'q', goldAnswer: 'a', goldBlockIds: ['b1', 'b2'] },
+    { exampleId: 'q1', predictedAnswer: '', retrievedBlockIds: ['b1', 'b3', 'b4'], latencyMs: 0 },
+  )
+  assert.equal(score.exactMatch, null)
+  assert.ok(Math.abs(score.citationPrecision - 1 / 3) < 1e-9)
+  assert.ok(Math.abs(score.citationRecall - 1 / 2) < 1e-9)
+  assert.ok(Math.abs(score.f1 - 0.4) < 1e-9)
+})
+
+test('CitationOverlapScorer null when both gold and retrieved are empty', () => {
+  const scorer = new CitationOverlapScorer()
+  const score = scorer.score(
+    { id: 'q', question: 'q', goldAnswer: 'a' },
+    { exampleId: 'q', predictedAnswer: '', retrievedBlockIds: [], latencyMs: 0 },
+  )
+  assert.equal(score.f1, null)
+  assert.equal(score.citationPrecision, null)
 })
 
 test('aggregate computes means over numeric scores only', () => {

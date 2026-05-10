@@ -19,9 +19,21 @@ The < 5% false attribution rate target from H4.4 means precision > 0.95.
 from __future__ import annotations
 
 
+def _normalize(s: str) -> str:
+    """Normalize for substring matching: lowercase, collapse whitespace."""
+    import re
+
+    return re.sub(r"\s+", " ", s.strip().lower())
+
+
 def _contains_span(text: str, gold_span: str) -> bool:
-    """Case-insensitive substring check for gold span in block text."""
-    return gold_span.strip().lower() in text.strip().lower()
+    """Case- and whitespace-insensitive substring check.
+
+    CUAD's gold spans are extracted with the source's idiosyncratic
+    whitespace (multiple spaces, embedded newlines). Normalize both sides
+    so attribution F1 measures *content* overlap, not surface formatting.
+    """
+    return _normalize(gold_span) in _normalize(text)
 
 
 def attribution_f1(
