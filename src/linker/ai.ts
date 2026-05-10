@@ -1,6 +1,9 @@
 import { claimJob, completeJob, failJob } from '../db/jobs.js'
 import { query, execute } from '../db/queries.js'
 import { randomUUID } from 'node:crypto'
+import { embedEdge } from './edge-embed.js'
+import { writeAgeEdge } from '../db/age.js'
+import { timeStage } from '../ingest/timing.js'
 
 export const SIGNALS: Record<string, string[]> = {
   contradicts:      ['not ', 'however', 'contrary', 'but ', 'instead', 'unlike', 'disagrees', 'conflicts'],
@@ -61,19 +64,30 @@ export async function processAiLinks(versionId: string): Promise<void> {
       const relType = classifyPair(block.content, candidate.content, cosineSim)
       if (!relType) continue
 
-      await execute(
-        `INSERT INTO links (id, src, dst, layer, rel_type, weight, confirmed, provenance)
-         VALUES ($1, $2, $3, 'ai', $4, $5, null, $6)
-         ON CONFLICT DO NOTHING`,
-        [
-          randomUUID(),
-          block.id,
-          candidate.id,
-          relType,
-          cosineSim,
-          JSON.stringify({ model: 'keyword-heuristics-v1', confidence: cosineSim, created_at: new Date().toISOString() })
-        ]
+      // Edge embedding (issue #75, phase-2): templated string strategy.
+      // Wrapped in timeStage so #12 (H5.1) can observe per-edge embed cost.
+      const edgeVec = await timeStage('edge_embed', { docId: block.doc_id, blockCount: 1 }, () =>
+        embedEdge(block.content, candidate.content, relType),
       )
+
+      await execute(
+        `INSERT INTO links (id, src, dst, layer, rel_type, weight, confirmed, provenance, edge_embedding)
+         VALUES ($1, $2, $3, 'ai', $4, $5, null, $6, ${edgeVec ? '$7::vector' : 'NULL'})
+         ON CONFLICT DO NOTHING`,
+        edgeVec
+          ? [
+              randomUUID(), block.id, candidate.id, relType, cosineSim,
+              JSON.stringify({ model: 'keyword-heuristics-v1', confidence: cosineSim, created_at: new Date().toISOString() }),
+              edgeVec,
+            ]
+          : [
+              randomUUID(), block.id, candidate.id, relType, cosineSim,
+              JSON.stringify({ model: 'keyword-heuristics-v1', confidence: cosineSim, created_at: new Date().toISOString() }),
+            ],
+      )
+
+      // Dual-write to AGE. No-op when AGE_DATABASE_URL is unset.
+      await writeAgeEdge({ src: block.id, dst: candidate.id, layer: 'ai', relType, weight: cosineSim })
     }
   }
 }
