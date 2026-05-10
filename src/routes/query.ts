@@ -13,6 +13,37 @@ async function getCachedEmbedding(text: string): Promise<number[]> {
   return vec
 }
 
+/**
+ * POST /query — public query API entrypoint.
+ *
+ * Phase-2 contract scout (issue #113, implementation in #104).
+ *
+ * Phase 2 of `docs/implementation-plan.md` collapses the public Query API to
+ * three first-class modes: `graph`, `vector` (alias for the legacy
+ * `semantic`), and `hybrid`. The fulltext and edge_semantic modes are being
+ * narrowed out of the external contract while their tsvector / edge-embedding
+ * backing stays intact internally.
+ *
+ * To let issue #104 land that contract change against frozen seams, this
+ * router dispatches to *named handler functions* — `handleGraphQuery`,
+ * `handleVectorQuery`, `handleHybridQuery`, `handleFulltextQueryDeprecated`,
+ * and `handleEdgeSemanticQueryDeprecated`. The deprecated handlers keep their
+ * existing behaviour so consumers do not break, and #104 is responsible for
+ * removing them from the dispatch table and the OpenAPI schema.
+ *
+ * Target contract shape after #104:
+ *   {
+ *     corpus_id: string,
+ *     mode: 'graph' | 'vector' | 'hybrid',
+ *     query?: string,                // required for vector + hybrid
+ *     seed_block_id?: string,        // required for graph
+ *     max_hops?: number,             // graph only
+ *     layers?: string[],             // graph + hybrid
+ *     rel_types?: string[],          // graph only
+ *     direction?: 'out' | 'in' | 'both', // graph only
+ *     limit?: number,
+ *   }
+ */
 route('POST', '/query', async (req, res) => {
   const body = await readBody(req) as any
   if (!body?.corpus_id) return send(res, 400, { error: 'corpus_id is required' })
@@ -22,53 +53,106 @@ route('POST', '/query', async (req, res) => {
   const corpus = await queryOne('SELECT id FROM corpora WHERE id = $1', [body.corpus_id])
   if (!corpus) return send(res, 404, { error: 'corpus not found' })
 
-  if (mode === 'semantic') {
-    if (!body.query) return send(res, 400, { error: 'query is required for semantic mode' })
-    return send(res, 200, { results: await semanticSearch(body.corpus_id, body.query, limit) })
+  // `vector` is the phase-2 contract name; `semantic` remains accepted as a
+  // compatibility alias until #104 narrows the external mode enum.
+  if (mode === 'semantic' || mode === 'vector') {
+    return handleVectorQuery(body, limit, res)
   }
   if (mode === 'fulltext') {
-    if (!body.query) return send(res, 400, { error: 'query is required for fulltext mode' })
-    return send(res, 200, { results: await fulltextSearch(body.corpus_id, body.query, limit) })
+    return handleFulltextQueryDeprecated(body, limit, res)
   }
   if (mode === 'graph') {
-    if (!body.seed_block_id) return send(res, 400, { error: 'seed_block_id is required for graph mode' })
-    const maxHops = body.max_hops ?? 3
-    const layers = body.layers ?? ['structural', 'semantic', 'ai']
-    const relTypes = body.rel_types as string[] | undefined
-    const direction = (body.direction as 'out' | 'in' | 'both' | undefined) ?? 'out'
-    return send(res, 200, {
-      results: await graphSearch(body.seed_block_id, maxHops, layers, limit, relTypes, direction),
-    })
+    return handleGraphQuery(body, limit, res)
   }
   if (mode === 'hybrid') {
-    if (!body.query) return send(res, 400, { error: 'query is required for hybrid mode' })
-    return send(res, 200, { results: await hybridSearch(body.corpus_id, body.query, limit) })
+    return handleHybridQuery(body, limit, res)
   }
   if (mode === 'edge_semantic') {
-    // Edge similarity search (issue #75, phase-2). Caller supplies either:
-    //   - `query`: free-text — embedded directly with the block model so it
-    //     lives in the same 384-D space as edge embeddings.
-    //   - `(src_text, dst_text, rel_hint)`: structured triple, embedded as
-    //     "<rel_hint>: <src_text> -> <dst_text>" mirroring the linker's
-    //     buildEdgeText template so retrieval probes the same construction
-    //     used at write time.
-    // Optional `layers` filters on link.layer.
-    const hasTriple = body.src_text && body.dst_text
-    if (!body.query && !hasTriple) {
-      return send(res, 400, { error: 'query or (src_text,dst_text) required for edge_semantic mode' })
-    }
-    let probeText: string
-    if (hasTriple) {
-      const { buildEdgeText } = await import('../linker/edge-embed.js')
-      probeText = buildEdgeText(body.src_text, body.dst_text, body.rel_hint ?? null)
-    } else {
-      probeText = body.query
-    }
-    const layers = body.layers as string[] | undefined
-    return send(res, 200, { results: await edgeSemanticSearch(body.corpus_id, probeText, layers, limit) })
+    return handleEdgeSemanticQueryDeprecated(body, limit, res)
   }
   return send(res, 400, { error: `unknown mode: ${mode}` })
 })
+
+/**
+ * Vector-similarity query handler (phase-2 contract name for the legacy
+ * `semantic` mode). Embeds the query string and returns the top-K nearest
+ * blocks in the corpus by cosine similarity over `blocks.embedding`.
+ *
+ * Stable seam — issue #104 narrows the public mode enum to
+ * `'graph' | 'vector' | 'hybrid'`; this handler is the implementation that
+ * change will keep.
+ */
+async function handleVectorQuery(body: any, limit: number, res: any) {
+  if (!body.query) return send(res, 400, { error: 'query is required for vector mode' })
+  return send(res, 200, { results: await semanticSearch(body.corpus_id, body.query, limit) })
+}
+
+/**
+ * Graph traversal query handler. Phase-2 first-class mode.
+ *
+ * Discovers blocks reachable from `seed_block_id` over the AGE link graph,
+ * filtered by edge layer, rel_type, and direction. Stable seam — kept by #104.
+ */
+async function handleGraphQuery(body: any, limit: number, res: any) {
+  if (!body.seed_block_id) return send(res, 400, { error: 'seed_block_id is required for graph mode' })
+  const maxHops = body.max_hops ?? 3
+  const layers = body.layers ?? ['structural', 'semantic', 'ai']
+  const relTypes = body.rel_types as string[] | undefined
+  const direction = (body.direction as 'out' | 'in' | 'both' | undefined) ?? 'out'
+  return send(res, 200, {
+    results: await graphSearch(body.seed_block_id, maxHops, layers, limit, relTypes, direction),
+  })
+}
+
+/**
+ * Hybrid retrieval handler — vector ANN seed ⊕ one-hop graph expansion.
+ * Phase-2 first-class mode. Stable seam — kept by #104.
+ */
+async function handleHybridQuery(body: any, limit: number, res: any) {
+  if (!body.query) return send(res, 400, { error: 'query is required for hybrid mode' })
+  return send(res, 200, { results: await hybridSearch(body.corpus_id, body.query, limit) })
+}
+
+/**
+ * @deprecated Phase-2 contract narrowing (issue #104) removes `mode: "fulltext"`
+ * from the public Query API. The tsvector index on `blocks.tsv` stays for
+ * internal use; only the external entrypoint is being retired. Do not extend
+ * this handler — direct new work to `handleVectorQuery` or `handleHybridQuery`.
+ */
+async function handleFulltextQueryDeprecated(body: any, limit: number, res: any) {
+  if (!body.query) return send(res, 400, { error: 'query is required for fulltext mode' })
+  return send(res, 200, { results: await fulltextSearch(body.corpus_id, body.query, limit) })
+}
+
+/**
+ * @deprecated Phase-2 contract narrowing (issue #104) removes
+ * `mode: "edge_semantic"` from the public Query API. Edge embeddings remain in
+ * the linker pipeline as an internal signal; consumers needing edge-level
+ * retrieval should migrate to `handleHybridQuery`. Do not extend this handler.
+ */
+async function handleEdgeSemanticQueryDeprecated(body: any, limit: number, res: any) {
+  // Edge similarity search (issue #75, phase-2). Caller supplies either:
+  //   - `query`: free-text — embedded directly with the block model so it
+  //     lives in the same 384-D space as edge embeddings.
+  //   - `(src_text, dst_text, rel_hint)`: structured triple, embedded as
+  //     "<rel_hint>: <src_text> -> <dst_text>" mirroring the linker's
+  //     buildEdgeText template so retrieval probes the same construction
+  //     used at write time.
+  // Optional `layers` filters on link.layer.
+  const hasTriple = body.src_text && body.dst_text
+  if (!body.query && !hasTriple) {
+    return send(res, 400, { error: 'query or (src_text,dst_text) required for edge_semantic mode' })
+  }
+  let probeText: string
+  if (hasTriple) {
+    const { buildEdgeText } = await import('../linker/edge-embed.js')
+    probeText = buildEdgeText(body.src_text, body.dst_text, body.rel_hint ?? null)
+  } else {
+    probeText = body.query
+  }
+  const layers = body.layers as string[] | undefined
+  return send(res, 200, { results: await edgeSemanticSearch(body.corpus_id, probeText, layers, limit) })
+}
 
 async function edgeSemanticSearch(
   corpusId: string,
