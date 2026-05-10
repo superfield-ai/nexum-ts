@@ -1,7 +1,7 @@
 import { route, send, readBody } from '../server.js'
 import { query, queryOne } from '../db/queries.js'
 import { embedTexts } from '../embed/local.js'
-import { getAgePool } from '../db/age.js'
+import { getAgePool, oneHopNeighborsFromAge } from '../db/age.js'
 
 const queryCache = new Map<string, { embedding: number[]; expires: number }>()
 
@@ -312,21 +312,80 @@ function parseAgNumber(v: unknown): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+/**
+ * Hybrid retrieval: vector-ANN seeding ⊕ one-hop graph expansion (issue #102).
+ *
+ * Architecture A2 ("hybrid = graph ⊕ vector"). After the phase-1 AGE cutover
+ * the graph layer's source of truth is the `nexum_links` Apache AGE graph,
+ * so the neighbour expansion runs as a single Cypher one-hop instead of the
+ * legacy recursive-CTE traversal that this function previously delegated to
+ * `graphSearch`.
+ *
+ * Pipeline:
+ *   1. Vector-ANN top-K seed (unchanged) — pulls semantic-similar blocks.
+ *   2. One-hop expansion through AGE Cypher across the canonical link
+ *      layers (`structural`, `semantic`, `ai`). Issued as a single batched
+ *      query keyed by all seed ids to keep latency O(1) round-trips.
+ *   3. Enrich neighbour ids with block content from Postgres in one IN
+ *      query, then merge into the result list. Semantic order is preserved
+ *      first, graph neighbours appended in iteration order, and the public
+ *      response shape (`block_id`, `content`, `score`/`depth`, `rel_type`,
+ *      `document`, `origin`) is held stable so existing clients keep working.
+ *
+ * If the AGE one-hop returns nothing (e.g. the graph is empty for a brand
+ * new corpus, or AGE is transiently unavailable), the response degrades to
+ * the semantic-only baseline rather than failing the request.
+ */
 async function hybridSearch(corpusId: string, queryText: string, limit: number) {
-  // Step 1: semantic top 10
+  // Step 1: vector-ANN top-K seed (unchanged).
   const semanticResults = await semanticSearch(corpusId, queryText, 10)
   const seen = new Set<string>(semanticResults.map(r => r.block_id))
   const results: any[] = semanticResults.map(r => ({ ...r, origin: 'semantic' }))
 
-  // Step 2: one-hop expansion from each semantic result
+  if (semanticResults.length === 0) return results.slice(0, limit)
+
+  // Step 2: one-hop neighbour expansion through AGE Cypher (replaces the
+  // recursive-CTE traversal). A single batched query covers every seed.
+  const seedIds = semanticResults.map(r => r.block_id)
+  const layers = ['structural', 'semantic', 'ai']
+  const neighborMap = await oneHopNeighborsFromAge(seedIds, layers)
+
+  // Collect unique neighbour ids in seed order; carry rel_type from the
+  // first edge that introduced each neighbour to keep ordering deterministic.
+  const orderedNeighbours: { blockId: string; relType: string | null }[] = []
   for (const sr of semanticResults) {
-    const neighbors = await graphSearch(sr.block_id, 1, ['structural', 'semantic', 'ai'], 10)
-    for (const n of neighbors) {
-      if (!seen.has(n.block_id)) {
-        seen.add(n.block_id)
-        results.push({ ...n, origin: 'graph' })
-      }
+    const neighbours = neighborMap.get(sr.block_id) ?? []
+    for (const n of neighbours) {
+      if (seen.has(n.blockId)) continue
+      seen.add(n.blockId)
+      orderedNeighbours.push({ blockId: n.blockId, relType: n.relType })
     }
+  }
+
+  if (orderedNeighbours.length === 0) return results.slice(0, limit)
+
+  // Step 3: enrich neighbour block ids with content + document metadata in
+  // a single Postgres round-trip, then re-emit in graph traversal order.
+  const ids = orderedNeighbours.map(n => n.blockId)
+  const rows = await query<any>(
+    `SELECT b.id AS block_id, b.content,
+            d.id AS doc_id, d.title, d.external_id
+     FROM blocks b JOIN documents d ON d.id = b.doc_id
+     WHERE b.id = ANY($1)`,
+    [ids]
+  )
+  const byId = new Map<string, any>(rows.map((r: any) => [r.block_id, r]))
+  for (const n of orderedNeighbours) {
+    const r = byId.get(n.blockId)
+    if (!r) continue
+    results.push({
+      block_id: r.block_id,
+      content: r.content,
+      depth: 1,
+      rel_type: n.relType,
+      document: { id: r.doc_id, title: r.title, external_id: r.external_id },
+      origin: 'graph',
+    })
   }
 
   return results.slice(0, limit)

@@ -201,6 +201,113 @@ export function createCypherGraphClient(): CypherGraphClient {
 }
 
 /**
+ * Result of one-hop neighbour expansion through AGE Cypher.
+ *
+ * Returned by `oneHopNeighborsFromAge` — each row is one outgoing edge from
+ * a seed Block to a neighbour Block, scoped to the requested `layers` set.
+ * The shape mirrors what `hybridSearch` needs to enrich with Postgres block
+ * content: the neighbour block id and the relationship type.
+ */
+export interface OneHopNeighborRow {
+  /** UUID of the neighbour Block (the edge's destination vertex). */
+  blockId: string
+  /** Relationship type on the LINK edge, or null when not set. */
+  relType: string | null
+  /** Layer label on the LINK edge (structural | semantic | ai | ...). */
+  layer: string
+}
+
+/**
+ * One-hop outgoing neighbour expansion through AGE Cypher (issue #102).
+ *
+ * Replaces the recursive-CTE expansion previously used by `hybridSearch` so
+ * that all graph traversal goes through Apache AGE — the single source of
+ * truth for the graph layer after the phase-1 cutover. The query MATCHes
+ * `(seed:Block)-[r:LINK]->(b:Block)`, filters edges by `layer`, and returns
+ * neighbour ids paired with the originating seed id so callers can group
+ * results by seed without an additional round-trip.
+ *
+ * Implementation notes:
+ *   - AGE's `cypher(...)` SRF does not accept bind parameters, so we inline
+ *     the seed UUIDs and layer strings. UUIDs are validated by Postgres at
+ *     write time and `layer` is whitelisted by a CHECK constraint, bounding
+ *     the injection surface; we still defensively reject seeds that do not
+ *     match the UUID shape and escape single quotes in layers.
+ *   - We project three agtype columns (`seed_id`, `dst_id`, `layer`,
+ *     `rel_type`) and parse the JSON-ish agtype scalar wire format
+ *     (`"value"` for strings, `null` for missing).
+ *   - On any pool/Cypher error we return an empty result so hybrid retains
+ *     its semantic-only baseline rather than 500ing the whole request.
+ */
+export async function oneHopNeighborsFromAge(
+  seedIds: string[],
+  layers: string[],
+): Promise<Map<string, OneHopNeighborRow[]>> {
+  const out = new Map<string, OneHopNeighborRow[]>()
+  if (seedIds.length === 0 || layers.length === 0) return out
+
+  // Defensive UUID validation: only allow canonical 36-char hex+dash form.
+  const uuidRe = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+  const safeSeeds = seedIds.filter((s) => uuidRe.test(s))
+  if (safeSeeds.length === 0) return out
+
+  const seedList = safeSeeds.map((s) => `'${s}'`).join(', ')
+  const layerList = layers.map((l) => `'${l.replace(/'/g, "''")}'`).join(', ')
+
+  const cypher = `
+    MATCH (seed:Block)-[r:LINK]->(b:Block)
+    WHERE seed.id IN [${seedList}] AND r.layer IN [${layerList}]
+    RETURN seed.id, b.id, r.layer, r.rel_type
+  `
+
+  let rows: Array<{ seed_id: unknown; dst_id: unknown; layer: unknown; rel_type: unknown }>
+  try {
+    const pool = await getAgePool()
+    const result = await pool.query(
+      `SELECT * FROM cypher('nexum_links', $$ ${cypher} $$)
+       AS (seed_id agtype, dst_id agtype, layer agtype, rel_type agtype)`,
+    )
+    rows = result.rows
+  } catch (err) {
+    console.error('age one-hop query failed', (err as Error).message)
+    return out
+  }
+
+  for (const r of rows) {
+    const seed = parseAgtypeScalar(r.seed_id)
+    const dst = parseAgtypeScalar(r.dst_id)
+    const layer = parseAgtypeScalar(r.layer)
+    const relType = parseAgtypeScalar(r.rel_type)
+    if (typeof seed !== 'string' || typeof dst !== 'string' || typeof layer !== 'string') continue
+    const list = out.get(seed) ?? []
+    list.push({ blockId: dst, relType: typeof relType === 'string' ? relType : null, layer })
+    out.set(seed, list)
+  }
+  return out
+}
+
+/**
+ * Parse a single AGE `agtype` scalar coming back over the wire.
+ *
+ * AGE returns scalars as JSON-ish strings — `"hello"` for a string, `null`
+ * for null, `42` for a number. Driver values may also arrive as native JS
+ * primitives depending on the agtype shape; this helper normalises both.
+ */
+function parseAgtypeScalar(v: unknown): unknown {
+  if (v === null || v === undefined) return null
+  if (typeof v !== 'string') return v
+  if (v === 'null') return null
+  // Strings come quoted; numbers/booleans don't. JSON.parse handles both.
+  try {
+    return JSON.parse(v)
+  } catch {
+    // Fallback: strip surrounding quotes if present.
+    if (v.startsWith('"') && v.endsWith('"')) return v.slice(1, -1)
+    return v
+  }
+}
+
+/**
  * Result of the boot-time AGE gate. After the phase-1 cutover only
  * `mode: 'required'` is reachable on a successful boot; any other state
  * causes `startupRequireAge()` to throw.
