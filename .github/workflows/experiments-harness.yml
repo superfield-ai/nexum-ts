@@ -5,15 +5,21 @@ on:
     paths:
       - 'experiments/**'
       - 'scripts/update-hypothesis-status.sh'
+      - 'scripts/lint-phase2-inference-client.mjs'
       - 'docs/research/methodology.md'
       - 'docs/research/hypotheses/**'
+      - 'src/inference/**'
+      - 'docker/Dockerfile.gpu'
       - '.github/workflows/experiments-harness.yml'
   pull_request:
     paths:
       - 'experiments/**'
       - 'scripts/update-hypothesis-status.sh'
+      - 'scripts/lint-phase2-inference-client.mjs'
       - 'docs/research/methodology.md'
       - 'docs/research/hypotheses/**'
+      - 'src/inference/**'
+      - 'docker/Dockerfile.gpu'
       - '.github/workflows/experiments-harness.yml'
 
 jobs:
@@ -63,3 +69,31 @@ jobs:
             assert d['gate']=='G4'; \
             assert 'pass' in d; \
             print('legacy g4 ok')"
+
+  phase2-scout:
+    name: phase-2 scout type-check + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install npm deps
+        run: npm ci --no-audit --no-fund
+
+      - name: tsc --noEmit (inference-client interface compiles)
+        run: npx tsc --noEmit
+
+      - name: Build dist for tests
+        run: npx tsc
+
+      - name: Inference-client unit test
+        run: node --test tests/unit/inference-client.test.mjs
+
+      - name: Phase-2 inference-client import lint
+        run: node scripts/lint-phase2-inference-client.mjs
+
+      - name: GPU Dockerfile spec exists
+        run: test -f docker/Dockerfile.gpu

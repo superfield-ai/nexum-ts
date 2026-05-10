@@ -419,3 +419,67 @@ parentheses point to the implementation issues.
 - `src/routes/documents.ts` wraps the parse and hash stages today; #12 will
   extend coverage to embed / link / version stages without changing the call
   site contract.
+
+---
+
+## Phase-2 Scout Seams (issue #79)
+
+The phase-2 dev-scout pre-stubs three surfaces shared by the Area-2/3/6/7
+implementation issues. Nothing here implements feature behaviour; each seam
+exists so two issues can develop in parallel against a fixed contract.
+Cross-references in parentheses point to the implementation issues.
+
+### 1. GPU runtime container spec (#13 / #18)
+
+- `docker/Dockerfile.gpu` is the canonical SPEC of the GPU runtime image.
+  It composes `apache/age:PG16_latest` (matching the phase-1 AGE shim) on
+  top of `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` and installs
+  Python 3.11 + libpq.
+- The scout does NOT build or push the image. CI is CPU-only; the first
+  downstream issue that needs the runtime flips on a build/push step in
+  `.github/workflows/experiments-harness.yml` and pins the
+  torch / onnxruntime-gpu versions for its workload.
+- Both #13 and #18 MUST consume this Dockerfile (or a child image FROM it)
+  so the AGE / CUDA / Postgres versions stay in lockstep.
+
+### 2. Inference-client interface (#10 / #14)
+
+- `src/inference/client.ts` exports `InferenceClient`, `RetrievalMode`,
+  `RetrievedBlock`, `RetrievalResult`, `EvidenceScore`, and a
+  `StubInferenceClient` whose methods reject loudly.
+- `RetrievalMode` discriminates `vector` / `graph` / `hybrid`. New modes
+  added later MUST extend the union in `client.ts` before being referenced
+  elsewhere.
+- #10 ships an HTTP-backed retrieval client; #14 ships an in-process client
+  that walks the curriculum graph. Both implement the same interface so the
+  evaluator in `src/eval/harness.ts` can swap them without conditional logic.
+
+### 3. GPU paging conventions
+
+The GPU runtime image and any host that runs it MUST follow these mount
+conventions so that downstream experiments can be moved between hosts
+without code changes:
+
+- `/var/cache/nexum/embed` — ephemeral embedding cache. SHOULD be backed by
+  tmpfs in production; treated as scratch by all code that writes to it.
+  Cache misses re-embed; nothing here is durable.
+- `/var/cache/nexum/models` — model weight cache. SHOULD be a read-only
+  bind mount in production so that swapping a checkpoint is a host-level
+  operation, not a container rebuild.
+- `/var/lib/postgresql/data` — the ONLY durable mount. AGE graph state and
+  pgvector tables both live here. GPU experiments MUST NOT write durable
+  state anywhere else; if they need to, they extend `db/schema.sql` and
+  ride the standard migration path.
+- Pinned host memory for GPU staging is sized at runtime via
+  `--shm-size=2g` on `docker run`; the container itself does not assume a
+  specific value. Issues #13 / #18 record the value they used in the
+  experiment result JSON so reproducers can match it.
+
+### 4. CI lint: phase-2 entries import the inference client
+
+- `scripts/lint-phase2-inference-client.mjs` greps `experiments/area2-*`,
+  `experiments/area3-*`, `experiments/area6-*`, and `experiments/area7-*`
+  for any TypeScript entry that calls into an inference / retrieval / score
+  function but does NOT import from `src/inference/client.ts`. The lint is
+  a no-op while those experiment dirs are stub-only and exists so that the
+  first real implementation lands behind the shared interface.
