@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import pg from 'pg'
 import { getPool } from './pool.js'
 import { config } from '../config.js'
+import { createCypherGraphClient } from './age.js'
 
 export async function migrate() {
   const sql = readFileSync(new URL('../../../db/schema.sql', import.meta.url), 'utf-8')
@@ -27,6 +28,43 @@ export async function migrate() {
   // also makes integration tests deterministic when they bring up an AGE
   // container after the volume is already initialized.
   await migrateAge()
+  // Phase-1 AGE-default cutover seam (issue #98). Stub today; issue #3 will
+  // replace it with a real backfill that copies every row of `links` into the
+  // `nexum_links` graph. Calling it here keeps the migrate entry point
+  // contract stable for downstream operators and CI.
+  await backfillLinksToAge()
+}
+
+/**
+ * Backfill every row of the `links` table into the `nexum_links` AGE graph
+ * (issue #98 scout, #3 implementation).
+ *
+ * Phase-1 contract (frozen):
+ *  - MUST be safe to call when AGE is unavailable — returns
+ *    `{ ok: true, copied: 0, skipped: 'age-unavailable' }` and logs nothing
+ *    surprising.
+ *  - MUST be idempotent — re-running over an already-backfilled graph is a
+ *    no-op (Cypher `MERGE` semantics, same as `writeAgeEdge`).
+ *  - MUST be invoked from `migrate()` so a single `npm run migrate` is the
+ *    only step an operator needs after a phase-1 deploy.
+ *
+ * Stub today: returns the unavailable shape and does not read `links`. The
+ * real implementation in #3 will stream rows in batches via `COPY`-friendly
+ * Cypher to keep memory bounded on large corpora.
+ */
+export interface BackfillLinksToAgeResult {
+  ok: boolean
+  copied: number
+  skipped?: 'age-unavailable' | 'stub'
+}
+
+export async function backfillLinksToAge(): Promise<BackfillLinksToAgeResult> {
+  const client = createCypherGraphClient()
+  if (!(await client.available())) {
+    return { ok: true, copied: 0, skipped: 'age-unavailable' }
+  }
+  // Phase-1 stub: contract is frozen, behaviour lands in #3.
+  return { ok: true, copied: 0, skipped: 'stub' }
 }
 
 export async function migrateAge(): Promise<boolean> {
