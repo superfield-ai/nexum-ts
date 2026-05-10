@@ -459,24 +459,30 @@ Cross-references in parentheses point to the implementation issues.
   through `client.query()`. Issue #6 will delete the recursive-CTE traversal
   in favour of the same path.
 
-### 3. `backfillLinksToAge()` migrate stub (#3 owns the implementation)
+### 3. `backfillLinksToAge()` migrate step (issue #100, shipped)
 
 - `src/db/migrate.ts` exports `backfillLinksToAge(): Promise<BackfillLinksToAgeResult>`
   and calls it from the end of `migrate()` after `migrateAge()`.
-- The stub returns `{ ok: true, copied: 0, skipped: 'age-unavailable' }` when
-  AGE is not present, and `{ ok: true, copied: 0, skipped: 'stub' }`
-  otherwise. It does not read from `links`.
-- Issue #3 will replace the body with a streaming backfill that copies every
-  row of `links` into the `nexum_links` graph using `MERGE`-based Cypher so
-  the operation is idempotent and re-runnable.
-- The contract that #3 must preserve: callable from `migrate()`, idempotent,
-  safe when AGE is unavailable, returns `BackfillLinksToAgeResult`.
+- When AGE is unavailable the function short-circuits to
+  `{ ok: true, copied: 0, skipped: 'age-unavailable' }` so the soft-fail
+  contract for non-AGE deploys is preserved.
+- When AGE is available the function streams every row of `links` through a
+  server-side Postgres cursor (batch size 500) and replays each row into
+  `nexum_links` as a `MERGE`-keyed `LINK` edge. The MERGE key is `link_id`
+  so the AGE edge count is exactly the `links` row count, even if two rows
+  collapse to the same `(src, dst, layer, rel_type)` tuple.
+- Re-running `migrate()` against an already-backfilled graph is a no-op: the
+  function compares `countEdges()` against the row count and skips the cursor
+  scan when the graph already has at least one edge per row.
+- Errors during backfill (including row-validation failures) propagate out of
+  `migrate()` so operators see partial-state errors instead of a silently
+  divergent graph.
 
 ### Out of scope for this scout
 
 - Removing or rewriting the recursive-CTE traversal (issue #6).
 - Actually requiring AGE at startup (issue #2).
-- Actually backfilling rows (issue #3).
+- Actually backfilling rows (issue #100, now shipped).
 - Porting `graphSearch` / `hybridSearch` (issues #4, #5).
 
 ---
