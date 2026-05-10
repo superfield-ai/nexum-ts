@@ -16,50 +16,64 @@ async function getCachedEmbedding(text: string): Promise<number[]> {
 /**
  * POST /query — public query API entrypoint.
  *
- * Phase-2 contract scout (issue #113, implementation in #104).
+ * Phase-2 contract (issue #104, implementing the scout in #113).
  *
- * Phase 2 of `docs/implementation-plan.md` collapses the public Query API to
- * three first-class modes: `graph`, `vector` (alias for the legacy
- * `semantic`), and `hybrid`. The fulltext and edge_semantic modes are being
- * narrowed out of the external contract while their tsvector / edge-embedding
- * backing stays intact internally.
+ * Per `docs/implementation-plan.md` phase 2 and `docs/product.md` § "Query
+ * API", the public Query API exposes exactly two first-class modes plus
+ * their composition:
  *
- * To let issue #104 land that contract change against frozen seams, this
- * router dispatches to *named handler functions* — `handleGraphQuery`,
- * `handleVectorQuery`, `handleHybridQuery`, `handleFulltextQueryDeprecated`,
- * and `handleEdgeSemanticQueryDeprecated`. The deprecated handlers keep their
- * existing behaviour so consumers do not break, and #104 is responsible for
- * removing them from the dispatch table and the OpenAPI schema.
+ *   - `vector` — embedding-similarity search (the legacy `semantic` mode).
+ *     Accepts an optional `target: 'blocks' | 'edges'` parameter; default is
+ *     `blocks`. `target: 'edges'` ranks links by `links.edge_embedding`,
+ *     which subsumes the legacy `edge_semantic` mode.
+ *   - `graph` — typed-link traversal from a seed block.
+ *   - `hybrid` — vector-ANN seed ⊕ one-hop graph expansion.
  *
- * Target contract shape after #104:
+ * `semantic` is accepted as a backward-compat alias for `vector`. The
+ * deprecated `fulltext` and `edge_semantic` mode names are rejected with a
+ * 400 pointing callers at the supported modes. The tsvector index on
+ * `blocks.tsv` and the `links.edge_embedding` column survive as internal
+ * signals — the `fulltextSearch()` helper below remains callable from ops
+ * tooling and experiments, and `edgeSemanticSearch()` backs `target: 'edges'`.
+ *
+ * Public contract shape:
  *   {
  *     corpus_id: string,
  *     mode: 'graph' | 'vector' | 'hybrid',
  *     query?: string,                // required for vector + hybrid
+ *     target?: 'blocks' | 'edges',   // vector only; default 'blocks'
+ *     layers?: string[],             // graph + hybrid + vector(edges)
  *     seed_block_id?: string,        // required for graph
  *     max_hops?: number,             // graph only
- *     layers?: string[],             // graph + hybrid
  *     rel_types?: string[],          // graph only
  *     direction?: 'out' | 'in' | 'both', // graph only
  *     limit?: number,
  *   }
  */
+const DEPRECATED_MODES = new Set(['fulltext', 'edge_semantic'])
+
 route('POST', '/query', async (req, res) => {
   const body = await readBody(req) as any
   if (!body?.corpus_id) return send(res, 400, { error: 'corpus_id is required' })
   const mode = body.mode ?? 'semantic'
   const limit = Math.min(body.limit ?? 10, 100)
 
+  // Reject the legacy public modes with an actionable error before any DB
+  // work. The tsvector and edge-embedding columns remain available to
+  // internal callers; only the public route surface is narrowed.
+  if (DEPRECATED_MODES.has(mode)) {
+    return send(res, 400, {
+      error: `mode '${mode}' is deprecated; use mode=vector|graph|hybrid (vector accepts target=blocks|edges)`,
+    })
+  }
+
   const corpus = await queryOne('SELECT id FROM corpora WHERE id = $1', [body.corpus_id])
   if (!corpus) return send(res, 404, { error: 'corpus not found' })
 
   // `vector` is the phase-2 contract name; `semantic` remains accepted as a
-  // compatibility alias until #104 narrows the external mode enum.
+  // backward-compat alias.
   if (mode === 'semantic' || mode === 'vector') {
     return handleVectorQuery(body, limit, res)
-  }
-  if (mode === 'fulltext') {
-    return handleFulltextQueryDeprecated(body, limit, res)
   }
   if (mode === 'graph') {
     return handleGraphQuery(body, limit, res)
@@ -67,22 +81,51 @@ route('POST', '/query', async (req, res) => {
   if (mode === 'hybrid') {
     return handleHybridQuery(body, limit, res)
   }
-  if (mode === 'edge_semantic') {
-    return handleEdgeSemanticQueryDeprecated(body, limit, res)
-  }
-  return send(res, 400, { error: `unknown mode: ${mode}` })
+  return send(res, 400, {
+    error: `unknown mode: ${mode}; supported modes are vector, graph, hybrid`,
+  })
 })
 
 /**
  * Vector-similarity query handler (phase-2 contract name for the legacy
- * `semantic` mode). Embeds the query string and returns the top-K nearest
- * blocks in the corpus by cosine similarity over `blocks.embedding`.
+ * `semantic` mode).
  *
- * Stable seam — issue #104 narrows the public mode enum to
- * `'graph' | 'vector' | 'hybrid'`; this handler is the implementation that
- * change will keep.
+ * `target` selects which embedding space to search:
+ *   - `'blocks'` (default): cosine similarity over `blocks.embedding`,
+ *     returning the top-K nearest blocks in the corpus.
+ *   - `'edges'`: cosine similarity over `links.edge_embedding`, returning
+ *     the top-K nearest typed links. Optional `layers` filters on
+ *     `links.layer`. Subsumes the retired `edge_semantic` mode.
+ *
+ * Either a free-text `query` or, for `target: 'edges'`, a structured
+ * `(src_text, dst_text, rel_hint?)` triple must be supplied. The triple is
+ * embedded with the same `buildEdgeText` template the linker uses at write
+ * time so probe and stored embeddings live in matching constructions.
  */
 async function handleVectorQuery(body: any, limit: number, res: any) {
+  const target = (body.target as 'blocks' | 'edges' | undefined) ?? 'blocks'
+  if (target !== 'blocks' && target !== 'edges') {
+    return send(res, 400, { error: `unknown target: ${target}; supported targets are blocks, edges` })
+  }
+  if (target === 'edges') {
+    const hasTriple = body.src_text && body.dst_text
+    if (!body.query && !hasTriple) {
+      return send(res, 400, {
+        error: 'query or (src_text,dst_text) is required for vector mode with target=edges',
+      })
+    }
+    let probeText: string
+    if (hasTriple) {
+      const { buildEdgeText } = await import('../linker/edge-embed.js')
+      probeText = buildEdgeText(body.src_text, body.dst_text, body.rel_hint ?? null)
+    } else {
+      probeText = body.query
+    }
+    const layers = body.layers as string[] | undefined
+    return send(res, 200, {
+      results: await edgeSemanticSearch(body.corpus_id, probeText, layers, limit),
+    })
+  }
   if (!body.query) return send(res, 400, { error: 'query is required for vector mode' })
   return send(res, 200, { results: await semanticSearch(body.corpus_id, body.query, limit) })
 }
@@ -114,46 +157,12 @@ async function handleHybridQuery(body: any, limit: number, res: any) {
 }
 
 /**
- * @deprecated Phase-2 contract narrowing (issue #104) removes `mode: "fulltext"`
- * from the public Query API. The tsvector index on `blocks.tsv` stays for
- * internal use; only the external entrypoint is being retired. Do not extend
- * this handler — direct new work to `handleVectorQuery` or `handleHybridQuery`.
+ * Edge-similarity search over `links.edge_embedding`. Backs the public
+ * `mode: 'vector'` + `target: 'edges'` contract (issue #104). Was previously
+ * exposed as the standalone `edge_semantic` mode (#75); that public mode was
+ * retired in phase-2 contract narrowing, but the underlying embedding column
+ * and HNSW index remain part of the dual-write linker pipeline.
  */
-async function handleFulltextQueryDeprecated(body: any, limit: number, res: any) {
-  if (!body.query) return send(res, 400, { error: 'query is required for fulltext mode' })
-  return send(res, 200, { results: await fulltextSearch(body.corpus_id, body.query, limit) })
-}
-
-/**
- * @deprecated Phase-2 contract narrowing (issue #104) removes
- * `mode: "edge_semantic"` from the public Query API. Edge embeddings remain in
- * the linker pipeline as an internal signal; consumers needing edge-level
- * retrieval should migrate to `handleHybridQuery`. Do not extend this handler.
- */
-async function handleEdgeSemanticQueryDeprecated(body: any, limit: number, res: any) {
-  // Edge similarity search (issue #75, phase-2). Caller supplies either:
-  //   - `query`: free-text — embedded directly with the block model so it
-  //     lives in the same 384-D space as edge embeddings.
-  //   - `(src_text, dst_text, rel_hint)`: structured triple, embedded as
-  //     "<rel_hint>: <src_text> -> <dst_text>" mirroring the linker's
-  //     buildEdgeText template so retrieval probes the same construction
-  //     used at write time.
-  // Optional `layers` filters on link.layer.
-  const hasTriple = body.src_text && body.dst_text
-  if (!body.query && !hasTriple) {
-    return send(res, 400, { error: 'query or (src_text,dst_text) required for edge_semantic mode' })
-  }
-  let probeText: string
-  if (hasTriple) {
-    const { buildEdgeText } = await import('../linker/edge-embed.js')
-    probeText = buildEdgeText(body.src_text, body.dst_text, body.rel_hint ?? null)
-  } else {
-    probeText = body.query
-  }
-  const layers = body.layers as string[] | undefined
-  return send(res, 200, { results: await edgeSemanticSearch(body.corpus_id, probeText, layers, limit) })
-}
-
 async function edgeSemanticSearch(
   corpusId: string,
   probeText: string,
@@ -227,7 +236,13 @@ async function semanticSearch(corpusId: string, queryText: string, limit: number
   }))
 }
 
-async function fulltextSearch(corpusId: string, queryText: string, limit: number) {
+/**
+ * Internal-only fulltext search helper. The public Query API no longer
+ * exposes `mode: 'fulltext'` (issue #104), but the tsvector index on
+ * `blocks.tsv` remains and this helper stays callable from ops tooling and
+ * experiments (see `experiments/area1-storage-fitness`).
+ */
+export async function fulltextSearch(corpusId: string, queryText: string, limit: number) {
   const rows = await query<any>(
     `SELECT b.id AS block_id, b.content,
             ts_rank(b.tsv, plainto_tsquery('english', $1)) AS score,

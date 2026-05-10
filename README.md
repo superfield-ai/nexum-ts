@@ -62,7 +62,7 @@ A static copy lives at [`openapi.json`](./openapi.json) in the repo root.
 | `POST` | `/corpora` | Create a document corpus |
 | `GET` | `/corpora/:id` | Get corpus by ID |
 | `POST` | `/documents` | Ingest a document (returns block count) |
-| `POST` | `/query` | Query across blocks (fulltext / semantic / graph / hybrid) |
+| `POST` | `/query` | Query across blocks (vector / graph / hybrid) |
 | `POST` | `/blocks/embed` | Embed a text snippet |
 | `POST` | `/entities` | Create an entity (user or agent) |
 | `GET` | `/openapi.json` | OpenAPI spec |
@@ -72,7 +72,7 @@ A static copy lives at [`openapi.json`](./openapi.json) in the repo root.
 ```bash
 curl -s -X POST http://localhost:3000/query \
   -H 'Content-Type: application/json' \
-  -d '{"corpus_id":"<id>","query":"indemnification","mode":"fulltext"}'
+  -d '{"corpus_id":"<id>","query":"indemnification","mode":"vector"}'
 ```
 
 ---
