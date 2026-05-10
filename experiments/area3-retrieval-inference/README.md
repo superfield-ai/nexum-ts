@@ -31,7 +31,11 @@ real-time retrieval substrate.
 | `recency_test.py` | H3.1: compare Nexum (live graph + amendments) vs. vanilla RAG (stale snapshot) on recency-sensitive questions. |
 | `sparse_attention_ablation.py` | H3.3: sweep k=1..100; LM-as-judge scoring; `parse_judge_score` utility. |
 | `run_area3.py` | CLI orchestrator — runs all three experiments and writes JSON results. |
-| `tests/test_area3.py` | Full test suite (no live services required). |
+| `inference_client_adapter.py` | Python adapter for the Phase-2 `InferenceClient` seam (`src/inference/client.ts`). In-memory + HTTP variants. |
+| `quality_benchmark.py` | Issue-#10 small-scale quality benchmark: attribution F1 + factual correctness via the seam, comparing `vector` vs. `graph` modes. Writes a canonical `H3.1` envelope through `experiments/_lib/results_writer`. |
+| `run_quality.py` | CLI for the issue-#10 benchmark; `--offline` runs entirely without Nexum or an API key. |
+| `tests/test_area3.py` | Existing area-3 test suite (no live services required). |
+| `tests/test_quality_benchmark.py` | Issue-#10 quality benchmark tests (offline, deterministic). |
 
 ## Setup
 
@@ -60,6 +64,21 @@ python run_area3.py \
 # Dry run (CI / offline verification):
 python run_area3.py --dry-run --output results/area3_dry_run.json
 ```
+
+### Issue-#10 quality benchmark (small-scale, attribution F1 + factual correctness)
+
+```bash
+# Offline (no Nexum, no API key) — 50 synthetic CUAD-style questions:
+python run_quality.py --offline --max-questions 50
+
+# Live small-scale run against a Nexum instance:
+python run_quality.py --nexum-url http://localhost:3000 --max-questions 100
+```
+
+Writes a canonical `H3.1` envelope to `results/h3.1_<timestamp>.json` and
+prints a summary to stdout. The benchmark compares the `vector` (flat ANN
+baseline) and `graph` (typed-link traversal) modes of the Phase-2
+`InferenceClient` seam (`src/inference/client.ts`).
 
 ## Running the tests
 
