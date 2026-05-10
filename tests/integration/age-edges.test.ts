@@ -64,8 +64,7 @@ test('AGE pool reports the nexum_links graph and LINK label exist', async (t) =>
   if (!ageUrl) return t.skip('AGE container not available')
   const { getAgePool } = await import('../../src/db/age.js')
   const pool = await getAgePool()
-  assert.ok(pool, 'expected AGE pool to be available')
-  const { rows } = await pool!.query(
+  const { rows } = await pool.query(
     `SELECT name FROM ag_catalog.ag_graph WHERE name = 'nexum_links'`,
   )
   assert.equal(rows.length, 1)

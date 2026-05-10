@@ -32,16 +32,23 @@ test('vectorLiteral emits pgvector literal format', async () => {
   assert.equal(vectorLiteral([1, 2, 3]), '[1,2,3]')
 })
 
-test('age helper short-circuits when AGE_DATABASE_URL unset', async () => {
-  // config.AGE_DATABASE_URL is captured at import time from process.env. The
-  // test runner does not set it, so the helper must report unavailable
-  // synchronously. We do not unset env here in case a future caller does set
-  // it — short-circuit semantics are: pool returns null and writes return false.
-  const { resetAgePool, writeAgeEdge, countAgeEdges } = await import('../../dist/db/age.js')
+test('writeAgeEdge returns false when AGE Postgres is unreachable (no soft-fail)', async () => {
+  // Phase-1 cutover (#99) removed the soft-fail / optional-companion code
+  // paths in src/db/age.ts. There is no longer a "short-circuit when
+  // AGE_DATABASE_URL is unset" branch — writes attempt the connection and
+  // surface a boolean result. Pointing AGE at a closed port lets us assert
+  // the failure mode without a live database.
   const { config } = await import('../../dist/config.js')
-  resetAgePool()
-  if (!config.AGE_DATABASE_URL) {
-    assert.equal(await writeAgeEdge({ src: 'a', dst: 'b', layer: 'ai', relType: 'supports', weight: 1 }), false)
-    assert.equal(await countAgeEdges(), -1)
+  const prevAge = config.AGE_DATABASE_URL
+  config.AGE_DATABASE_URL = 'postgresql://nexum:nexum@127.0.0.1:1/nexum_no_age'
+  try {
+    const { resetAgePool, writeAgeEdge } = await import('../../dist/db/age.js')
+    resetAgePool()
+    const ok = await writeAgeEdge({ src: 'a', dst: 'b', layer: 'ai', relType: 'supports', weight: 1 })
+    assert.equal(ok, false)
+  } finally {
+    config.AGE_DATABASE_URL = prevAge
+    const { resetAgePool } = await import('../../dist/db/age.js')
+    resetAgePool()
   }
 })

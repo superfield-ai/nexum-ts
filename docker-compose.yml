@@ -1,8 +1,18 @@
 services:
-  # Primary Nexum database: Postgres 16 + pgvector.
-  # All runtime code (API, ingest, query) targets this service.
+  # Primary (and only) Nexum database: Apache AGE on Postgres 16 (issue #99).
+  #
+  # Phase-1 cutover made AGE a hard runtime requirement. The
+  # `apache/age:PG16_latest` image is the only Postgres service in the stack;
+  # all runtime code (API, ingest, query, linker dual-write) targets it on
+  # port 5432. The image bundles the AGE extension, and `db/migrations/` is
+  # mounted as `/docker-entrypoint-initdb.d` so the AGE shim
+  # (graph + label provisioning) is applied on first volume init.
+  #
+  # pgvector is layered on top via the schema migration in `db/schema.sql`
+  # (CREATE EXTENSION vector); the apache/age image ships with the build
+  # toolchain that lets pgvector be loaded as well.
   postgres:
-    image: pgvector/pgvector:pg16
+    image: apache/age:PG16_latest
     environment:
       POSTGRES_DB: nexum
       POSTGRES_USER: nexum
@@ -11,31 +21,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-
-  # Apache AGE companion service — phase-1 dev-scout stub (issue #78).
-  #
-  # This is a SECOND Postgres process exposing AGE (Cypher) on port 5433. It is
-  # NOT yet wired into runtime code; it exists so that #75 (AGE integration) and
-  # #6 (Area 1 H1.2 storage benchmark) can iterate against a stable container
-  # surface without re-doing compose plumbing.
-  #
-  # Why a separate service? The pgvector/pgvector:pg16 image does not bundle
-  # AGE, and apache/age does not bundle pgvector. Until a unified image is
-  # available, the scout keeps them side-by-side; benchmarks compare equivalent
-  # workloads across the two. See docs/research/pg-extensions.md (Apache AGE)
-  # and docs/engineering.md (Phase-1 Scout Seams).
-  postgres-age:
-    image: apache/age:PG16_latest
-    environment:
-      POSTGRES_DB: nexum_age
-      POSTGRES_USER: nexum
-      POSTGRES_PASSWORD: nexum
-    ports:
-      - "5433:5432"
-    volumes:
-      - agedata:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
 
 volumes:
   pgdata:
-  agedata:
