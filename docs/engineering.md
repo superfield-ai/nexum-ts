@@ -422,6 +422,65 @@ parentheses point to the implementation issues.
 
 ---
 
+## Phase-1 AGE-default cutover seams (issue #98)
+
+A second phase-1 dev-scout pre-stubs three surfaces shared by the four
+follow-on phase-1 implementation issues that cut the codebase from a dual-write
+recursive-CTE posture over to Apache AGE as the default data layer. Nothing
+here implements feature behaviour; each seam exists so the implementation
+issues can develop in parallel against a frozen contract.
+
+Cross-references in parentheses point to the implementation issues.
+
+### 1. `startupRequireAge()` boot hook (#2 owns the implementation)
+
+- `src/db/age.ts` exports `startupRequireAge(): Promise<StartupRequireAgeResult>`.
+- `src/index.ts` invokes it after `migrate()` and before `server.listen()`.
+- Today the hook is a non-blocking probe that returns `{ ok, mode, reason }`
+  where `mode` is one of `optional` (AGE_DATABASE_URL unset),
+  `unavailable` (set but extension missing — logs a warning),
+  or `required` (AGE present and probed).
+- Issue #2 will flip `mode: 'unavailable'` into a thrown error so the server
+  refuses to boot when AGE is missing. The signature is frozen now so #2 is
+  a behaviour change, not a refactor.
+
+### 2. `CypherGraphClient` interface (#4 / #5 / #6 consume it)
+
+- `src/db/age.ts` exports the `CypherGraphClient` interface with four methods:
+  `writeEdge(edge)`, `countEdges()`, `query<T>(cypher)`, `available()`.
+- `createCypherGraphClient()` returns a thin adapter over the existing
+  soft-fail `writeAgeEdge` / `countAgeEdges` helpers, so swapping a call site
+  onto the interface is observably a no-op until the implementation issues
+  land.
+- The `AgeEdgeInput` payload mirrors the shape already accepted by
+  `writeAgeEdge` so the structural and AI linker call sites can be swapped
+  mechanically.
+- Issues #4 (`graphSearch`) and #5 (`hybridSearch`) will route their Cypher
+  through `client.query()`. Issue #6 will delete the recursive-CTE traversal
+  in favour of the same path.
+
+### 3. `backfillLinksToAge()` migrate stub (#3 owns the implementation)
+
+- `src/db/migrate.ts` exports `backfillLinksToAge(): Promise<BackfillLinksToAgeResult>`
+  and calls it from the end of `migrate()` after `migrateAge()`.
+- The stub returns `{ ok: true, copied: 0, skipped: 'age-unavailable' }` when
+  AGE is not present, and `{ ok: true, copied: 0, skipped: 'stub' }`
+  otherwise. It does not read from `links`.
+- Issue #3 will replace the body with a streaming backfill that copies every
+  row of `links` into the `nexum_links` graph using `MERGE`-based Cypher so
+  the operation is idempotent and re-runnable.
+- The contract that #3 must preserve: callable from `migrate()`, idempotent,
+  safe when AGE is unavailable, returns `BackfillLinksToAgeResult`.
+
+### Out of scope for this scout
+
+- Removing or rewriting the recursive-CTE traversal (issue #6).
+- Actually requiring AGE at startup (issue #2).
+- Actually backfilling rows (issue #3).
+- Porting `graphSearch` / `hybridSearch` (issues #4, #5).
+
+---
+
 ## Phase-2 Scout Seams (issue #79)
 
 The phase-2 dev-scout pre-stubs three surfaces shared by the Area-2/3/6/7
