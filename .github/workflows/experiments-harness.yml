@@ -9,10 +9,10 @@ on:
       - 'scripts/lint-phase1-age-cutover.mjs'
       - 'docs/research/methodology.md'
       - 'docs/research/hypotheses/**'
-      - 'src/inference/**'
-      - 'src/db/age.ts'
+      - 'src/**'
       - 'docker/Dockerfile.gpu'
       - 'docker-compose.yml'
+      - 'tests/unit/lint-phase2-inference-client.test.mjs'
       - '.github/workflows/experiments-harness.yml'
   pull_request:
     paths:
@@ -22,10 +22,10 @@ on:
       - 'scripts/lint-phase1-age-cutover.mjs'
       - 'docs/research/methodology.md'
       - 'docs/research/hypotheses/**'
-      - 'src/inference/**'
-      - 'src/db/age.ts'
+      - 'src/**'
       - 'docker/Dockerfile.gpu'
       - 'docker-compose.yml'
+      - 'tests/unit/lint-phase2-inference-client.test.mjs'
       - '.github/workflows/experiments-harness.yml'
 
 jobs:
@@ -100,6 +100,9 @@ jobs:
 
       - name: LocalCpuInferenceClient unit tests (issue #105)
         run: node --test tests/unit/local-cpu-inference-client.test.mjs
+
+      - name: Phase-2/3 inference-client lint unit tests (issue #107)
+        run: node --test tests/unit/lint-phase2-inference-client.test.mjs
 
       - name: Phase-2 inference-client import lint
         run: node scripts/lint-phase2-inference-client.mjs
