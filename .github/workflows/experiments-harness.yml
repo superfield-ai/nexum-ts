@@ -95,8 +95,11 @@ jobs:
       - name: Build dist for tests
         run: npx tsc
 
-      - name: Inference-client unit test
+      - name: Inference-client unit test (stub interface)
         run: node --test tests/unit/inference-client.test.mjs
+
+      - name: LocalCpuInferenceClient unit tests (issue #105)
+        run: node --test tests/unit/local-cpu-inference-client.test.mjs
 
       - name: Phase-2 inference-client import lint
         run: node scripts/lint-phase2-inference-client.mjs

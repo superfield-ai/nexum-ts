@@ -10,7 +10,8 @@
     "test": "node --test",
     "test:integration": "node --test tests/integration/",
     "migrate": "tsx src/db/migrate.ts",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "fetch-model": "tsx scripts/fetch-model.ts"
   },
   "dependencies": {
     "@xenova/transformers": "^2",

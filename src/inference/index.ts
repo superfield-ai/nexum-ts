@@ -1,33 +1,31 @@
 /**
- * Phase-3 dev-scout (issue #114): default-binding hook for `InferenceClient`.
+ * Phase-3 inference default (issues #114, #105).
  *
- * Call sites that want "the inference client" — initially only
- * `src/linker/ai.ts` after the #106 port — go through
- * `getDefaultInferenceClient()` rather than `new`-ing a concrete class. That
- * keeps the eventual swap from a heuristic linker to a real local-CPU model
- * (issue #105) a single-file change instead of a sweep across the codebase.
+ * Call sites that want "the inference client" go through
+ * `getDefaultInferenceClient()` rather than `new`-ing a concrete class.
  *
- * Selection contract (frozen by this scout):
+ * Selection contract:
  *
  *   - The factory is memoised; the first call wins for the lifetime of the
  *     process. Tests that want a different client MUST call
  *     `setDefaultInferenceClient()` before any code path that resolves the
  *     default, or `resetDefaultInferenceClient()` between cases.
  *   - The factory consults `process.env.NEXUM_INFERENCE_BACKEND`:
- *       * `'stub'`       (default today, while #105 is in flight) — returns
- *         `StubInferenceClient`. This preserves "no behaviour change" for
- *         the dev-scout: nothing in `src/` reads the default yet.
- *       * `'local-cpu'`  (default after #105 merges) — returns
- *         `LocalCpuInferenceClient`. Already wired here so #105 only needs
- *         to flip the default constant and remove the stub branch.
+ *       * `'local-cpu'`  (default, issue #105) — returns
+ *         `LocalCpuInferenceClient` backed by `Xenova/nli-deberta-v3-xsmall`
+ *         ONNX int8. Run `npm run fetch-model` to warm the cache.
+ *       * `'stub'`       — returns `StubInferenceClient`. Useful in tests
+ *         that do not need real inference and set this env var explicitly.
  *       * `'anthropic'` / `'openai'` — opt-in hosted-provider adapters.
  *         The adapter classes exist as throwing stubs in
  *         `src/inference/adapters/` and are filled in by issue #108.
- *   - Unknown values fall back to the stub and log once on stderr.
+ *   - Unknown values fall back to the local-cpu default and log once on
+ *     stderr.
  *
  * Canonical references:
- *   - docs/engineering.md → "Phase-3 InferenceClient default seams (issue #114)"
- *   - docs/implementation-plan.md (Phase 3)
+ *   - docs/architecture.md § A4 / OD1
+ *   - docs/implementation-plan.md (Phase 3, issues #114 / #105)
+ *   - models/manifest.json (pinned model identity and checksums)
  */
 
 import { StubInferenceClient, type InferenceClient } from './client.js'
@@ -38,12 +36,16 @@ import { OpenAiInferenceClient } from './adapters/openai.js'
 export type InferenceBackend = 'stub' | 'local-cpu' | 'anthropic' | 'openai'
 
 /**
- * Phase-3 default. Today: `'stub'` — `getDefaultInferenceClient()` returns
- * the loud-failing stub so no caller can accidentally start using an
- * unimplemented backend. Issue #105 flips this to `'local-cpu'` once the
- * `@xenova/transformers` backend ships.
+ * Phase-3 default (issue #105): `'local-cpu'` — `getDefaultInferenceClient()`
+ * returns `LocalCpuInferenceClient` backed by `Xenova/nli-deberta-v3-xsmall`
+ * ONNX int8 (pinned in `models/manifest.json`). Run `npm run fetch-model`
+ * to warm the weight cache before first use.
+ *
+ * Prior to issue #105 this was `'stub'`; `StubInferenceClient` remains
+ * available via `NEXUM_INFERENCE_BACKEND=stub` for tests that need a no-op
+ * client.
  */
-export const PHASE3_DEFAULT_BACKEND: InferenceBackend = 'stub'
+export const PHASE3_DEFAULT_BACKEND: InferenceBackend = 'local-cpu'
 
 let cached: InferenceClient | null = null
 let warnedUnknown = false
