@@ -114,6 +114,32 @@ type EmbedPipeline = (text: string) => Promise<{ data: Float32Array | number[] }
 let classifierPipelineCache: Pipeline | null = null
 let embedPipelineCache: EmbedPipeline | null = null
 
+// ---------------------------------------------------------------------------
+// Test seams — exported so unit tests can inject a stub pipeline without
+// downloading model weights. These functions are no-ops in production.
+// ---------------------------------------------------------------------------
+
+/**
+ * Replace the module-level classifier pipeline cache with a test stub.
+ * Call `resetClassifierPipelineForTest()` in a finally block.
+ *
+ * @example
+ * ```ts
+ * injectClassifierPipelineForTest(async (text, labels) => ({
+ *   labels: ['supports', 'contradicts'],
+ *   scores: [0.80, 0.20],
+ * }))
+ * ```
+ */
+export function injectClassifierPipelineForTest(stub: Pipeline): void {
+  classifierPipelineCache = stub
+}
+
+/** Drop the test-injected classifier stub, restoring normal lazy-load behavior. */
+export function resetClassifierPipelineForTest(): void {
+  classifierPipelineCache = null
+}
+
 function resolveDefaultCacheDir(): string {
   // Resolve relative to this source file so it works regardless of cwd.
   const thisFile = fileURLToPath(import.meta.url)

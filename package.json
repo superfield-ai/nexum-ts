@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --experimental-test-module-mocks --test",
+    "test": "node --test",
     "test:integration": "node --test tests/integration/",
     "migrate": "tsx src/db/migrate.ts",
     "seed": "tsx scripts/seed.ts",
