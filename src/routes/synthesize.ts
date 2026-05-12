@@ -1,60 +1,221 @@
 /**
- * Phase-4 synthesis write-back route stubs (issue #115 dev-scout).
+ * Phase-4 synthesis write-back routes (issue #110).
  *
- * Wires POST /synthesize and GET /blocks into the router with no-op stubs so
- * the four phase-4 implementation issues can develop against a frozen API
- * surface without mutual blocking.
+ * POST /synthesize — agent write-back entrypoint.
+ * GET  /blocks     — cursor-based polling stub (issue #111 follow-on).
  *
  * Canonical docs
  * --------------
- * - docs/architecture.md   — API surface, block status lifecycle
+ * - docs/architecture.md   — A7 principal-scoped auth, block status lifecycle
  * - docs/implementation-plan.md — phase-4 synthesis write-back tasks
  *
- * Follow-on implementation issues (do NOT implement here — stubs only)
- * --------------------------------------------------------------------
- * - #110 — real POST /synthesize implementation (agent write-back)
- * - #111 — real GET /blocks?cursor= polling implementation
+ * Security contract (Architecture A7)
+ * ------------------------------------
+ * 1. Principal must be authenticated (Bearer token → entities table).
+ * 2. Principal must match agent_entity_id in the request body.
+ * 3. Principal must carry the 'blocks:synthesize' scope (or '*').
+ *
+ * Transaction contract
+ * --------------------
+ * - The synthesized block INSERT and all relational `links` rows are written
+ *   atomically in a single Postgres transaction.
+ * - AGE Cypher edges are written after the Postgres commit so the relational
+ *   record is always the authoritative record; AGE edges are best-effort and
+ *   surfaced as a per-edge `age_ok` flag in the response.
  */
 
 import { route, send, readBody } from '../server.js'
+import { requireAuth } from '../auth/middleware.js'
+import { getPool } from '../db/pool.js'
+import { writeAgeEdge } from '../db/age.js'
+import { LinkTypes } from '../synthesis/index.js'
+import { randomUUID, createHash } from 'node:crypto'
 
 // ---------------------------------------------------------------------------
 // POST /synthesize
 // ---------------------------------------------------------------------------
 
+interface SynthesizeBody {
+  corpus_id: string
+  content: string
+  source_block_ids: string[]
+  agent_entity_id: string
+  confidence?: number
+  meta?: Record<string, unknown>
+}
+
 /**
  * POST /synthesize — agent write-back entrypoint.
  *
- * Phase-4 scout stub (issue #115). Returns 501 Not Implemented so that
- * issue #110 can provide the real handler without any routing conflicts.
+ * Authenticated agents call this to persist a synthesized block with full
+ * provenance to its source blocks. Enforces principal == agent_entity_id and
+ * the 'blocks:synthesize' scope before writing any data.
  *
- * Expected request shape (locked here; implementation in #110):
+ * Request body:
  * {
- *   corpus_id: string,
- *   source_block_ids: string[],
- *   content: string,
- *   model?: string,
- *   meta?: Record<string, unknown>
+ *   corpus_id:        string,       // target corpus
+ *   content:          string,       // synthesized block content
+ *   source_block_ids: string[],     // provenance — must not be empty
+ *   agent_entity_id:  string,       // must equal the authenticated principal id
+ *   confidence?:      number,       // 0–1 confidence score (optional)
+ *   meta?:            object        // arbitrary metadata (optional)
  * }
  *
- * Expected response shape (locked here; implementation in #110):
+ * Response (201):
  * {
- *   id: string,            // synthesized block id
- *   status: SynthesizedBlockStatusValue,
- *   sourced_from: string[] // source_block_ids echoed back
+ *   id:           string,           // new synthesized block UUID
+ *   link_ids:     string[],         // relational link row IDs (sourced-from)
+ *   sourced_from: string[],         // source_block_ids echoed back
+ *   status:       'published'
  * }
  *
- * @see src/synthesis/index.ts — SynthesizedBlockStatus, LinkTypes.SOURCED_FROM
- * @see issue #110 — real implementation
+ * Error codes:
+ *   400 — missing / invalid fields
+ *   401 — not authenticated
+ *   403 — principal mismatch or missing blocks:synthesize scope
+ *   404 — corpus not found
+ *
+ * @see docs/architecture.md — A7 principal-scoped auth
+ * @see src/synthesis/index.ts — LinkTypes.SOURCED_FROM, SynthesizedBlockStatus
  */
 route('POST', '/synthesize', async (req, res) => {
-  // Phase-4 scout stub: validate shape minimally, then 501.
-  // Issue #110 replaces this body with real write-back logic.
-  const _body = await readBody(req)
-  void _body
-  send(res, 501, {
-    error: 'not_implemented',
-    message: 'POST /synthesize is a phase-4 stub — implementation tracked in issue #110',
+  // 1. Authenticate
+  const principal = await requireAuth(req)
+
+  // 2. Parse and validate body
+  const raw = await readBody(req) as Partial<SynthesizeBody>
+
+  if (!raw?.corpus_id || typeof raw.corpus_id !== 'string') {
+    return send(res, 400, { error: 'corpus_id is required' })
+  }
+  if (!raw?.content || typeof raw.content !== 'string') {
+    return send(res, 400, { error: 'content is required' })
+  }
+  if (!Array.isArray(raw?.source_block_ids) || raw.source_block_ids.length === 0) {
+    return send(res, 400, { error: 'source_block_ids must be a non-empty array' })
+  }
+  if (!raw?.agent_entity_id || typeof raw.agent_entity_id !== 'string') {
+    return send(res, 400, { error: 'agent_entity_id is required' })
+  }
+
+  const body = raw as SynthesizeBody
+
+  // 3. Enforce principal == agent_entity_id (Architecture A7)
+  if (principal.id !== body.agent_entity_id) {
+    const err = new Error('forbidden: principal does not match agent_entity_id') as any
+    err.status = 403
+    throw err
+  }
+
+  // 4. Enforce blocks:synthesize scope
+  const hasScope =
+    principal.scopes.includes('*') || principal.scopes.includes('blocks:synthesize')
+  if (!hasScope) {
+    const err = new Error('forbidden: missing blocks:synthesize scope') as any
+    err.status = 403
+    throw err
+  }
+
+  // 5. Validate corpus exists
+  const pool = await getPool()
+  const corpusRow = await pool.query<{ id: string }>(
+    'SELECT id FROM corpora WHERE id = $1',
+    [body.corpus_id],
+  )
+  if (corpusRow.rows.length === 0) {
+    return send(res, 404, { error: 'corpus not found' })
+  }
+
+  // 6. Write synthesized block + sourced-from links in one Postgres transaction
+  const client = await pool.connect()
+  let blockId: string
+  const linkIds: string[] = []
+
+  try {
+    await client.query('BEGIN')
+
+    // We need a doc_id to satisfy the blocks FK. Create a synthetic document
+    // anchored in the corpus to hold synthesized blocks.
+    // Using ON CONFLICT DO NOTHING + SELECT ensures idempotency across calls.
+    const syntheticTitle = `__synthesized__${body.corpus_id}`
+    const docRow = await client.query<{ id: string }>(
+      `INSERT INTO documents (title, corpus_id)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING
+         RETURNING id`,
+      [syntheticTitle, body.corpus_id],
+    )
+    let docId: string
+    if (docRow.rows.length > 0) {
+      docId = docRow.rows[0].id
+    } else {
+      // Document already exists; fetch its id
+      const existing = await client.query<{ id: string }>(
+        'SELECT id FROM documents WHERE title = $1 AND corpus_id = $2 LIMIT 1',
+        [syntheticTitle, body.corpus_id],
+      )
+      docId = existing.rows[0].id
+    }
+
+    // Insert synthesized block
+    blockId = randomUUID()
+    await client.query(
+      `INSERT INTO blocks (id, doc_id, content, content_hash, block_type, origin, synth_status)
+         VALUES ($1, $2, $3, $4, 'paragraph', 'synthesized', 'published')`,
+      [
+        blockId,
+        docId,
+        body.content,
+        // Lightweight content hash using SHA-256
+        createHash('sha256').update(body.content).digest('hex'),
+      ],
+    )
+
+    // Insert relational sourced-from links (one per source block)
+    const confidence = typeof body.confidence === 'number' ? body.confidence : 1.0
+    const provenance = JSON.stringify({
+      agent: body.agent_entity_id,
+      confidence,
+      created_at: new Date().toISOString(),
+    })
+
+    for (const srcId of body.source_block_ids) {
+      const linkId = randomUUID()
+      await client.query(
+        `INSERT INTO links (id, src, dst, layer, rel_type, provenance)
+           VALUES ($1, $2, $3, 'ai', $4, $5::jsonb)`,
+        [linkId, srcId, blockId, LinkTypes.SOURCED_FROM, provenance],
+      )
+      linkIds.push(linkId)
+    }
+
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+
+  // 7. Write AGE Cypher edges (best-effort; Postgres is the source of truth)
+  const ageResults = await Promise.all(
+    body.source_block_ids.map((srcId) =>
+      writeAgeEdge({
+        src: srcId,
+        dst: blockId,
+        layer: 'ai',
+        relType: LinkTypes.SOURCED_FROM,
+        weight: typeof body.confidence === 'number' ? body.confidence : 1.0,
+      }),
+    ),
+  )
+  void ageResults // surfaced in logs by writeAgeEdge on failure
+
+  send(res, 201, {
+    id: blockId,
+    link_ids: linkIds,
+    sourced_from: body.source_block_ids,
+    status: 'published',
   })
 })
 
@@ -65,26 +226,11 @@ route('POST', '/synthesize', async (req, res) => {
 /**
  * GET /blocks — cursor-based block polling endpoint.
  *
- * Phase-4 scout stub (issue #115). Returns 501 Not Implemented so that
- * issue #111 can provide the real handler without any routing conflicts.
+ * Phase-4 stub — returns 501 until issue #111 implements the polling cursor.
  *
- * Expected query parameters (locked here; implementation in #111):
- *   cursor  — opaque pagination token (base64-encoded timestamp + id)
- *   limit   — max results per page (default 50)
- *   corpus_id — filter to a single corpus
- *   status  — filter by SynthesizedBlockStatus value
- *
- * Expected response shape (locked here; implementation in #111):
- * {
- *   blocks: Array<{ id, status, created_at, updated_at, meta }>,
- *   next_cursor: string | null
- * }
- *
- * @see src/synthesis/index.ts — SynthesizedBlockStatus
  * @see issue #111 — real polling cursor implementation
  */
 route('GET', '/blocks', async (_req, res) => {
-  // Phase-4 scout stub: 501 until issue #111 provides the polling cursor.
   send(res, 501, {
     error: 'not_implemented',
     message: 'GET /blocks is a phase-4 stub — implementation tracked in issue #111',

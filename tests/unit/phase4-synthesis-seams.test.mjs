@@ -93,10 +93,13 @@ test('propagateStale() accepts any string block id', async () => {
 // Route stubs — POST /synthesize and GET /blocks
 // ---------------------------------------------------------------------------
 
-test('POST /synthesize route stub is registered and returns 501', async () => {
+test('POST /synthesize route is registered and handles requests (issue #110 implemented)', async () => {
   // Import route module to trigger route() registration
   await import('../../dist/routes/synthesize.js')
   const { createApp } = await import('../../dist/server.js')
+
+  // Auth is off in this unit test environment so principal === 'anon'
+  process.env.NEXUM_AUTH = 'off'
 
   const app = createApp()
   const port = await new Promise((resolve, reject) => {
@@ -107,15 +110,19 @@ test('POST /synthesize route stub is registered and returns 501', async () => {
   })
 
   try {
+    // With AUTH_OFF the anon principal gets id='anon'. The request below sends
+    // agent_entity_id='anon' (matching) with an empty source_block_ids array,
+    // so we expect 400 (validation error) — not 501 — confirming the real
+    // handler is wired (issue #110 implemented).
     const resp = await fetch(`http://127.0.0.1:${port}/synthesize`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ corpus_id: 'c1', source_block_ids: [], content: 'stub' }),
+      body: JSON.stringify({ corpus_id: 'c1', source_block_ids: [], content: 'test', agent_entity_id: 'anon' }),
     })
-    assert.equal(resp.status, 501,
-      'POST /synthesize stub must return 501 until issue #110 implements it')
-    const body = await resp.json()
-    assert.equal(body.error, 'not_implemented')
+    assert.notEqual(resp.status, 501,
+      'POST /synthesize must no longer return 501 — issue #110 has implemented the real handler')
+    // With empty source_block_ids the endpoint returns 400
+    assert.equal(resp.status, 400)
   } finally {
     await new Promise(r => app.close(r))
   }
