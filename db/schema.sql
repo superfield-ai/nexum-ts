@@ -79,6 +79,21 @@ CREATE TABLE IF NOT EXISTS blocks (
     meta            JSONB                    -- raw_refs, section context, page, etc.
 );
 
+-- Phase-4 synthesis write-back columns (issue #109).
+-- origin: how this block came to exist in the corpus.
+--   source      -- ingested directly from a source document (default for all pre-phase-4 blocks).
+--   synthesized -- written back by the agent layer via POST /synthesize.
+--   external    -- imported from an external system, not synthesized by this platform.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'source'
+    CHECK (origin IN ('source', 'synthesized', 'external'));
+
+-- synth_status: lifecycle state for synthesized blocks (null for source/external blocks).
+-- draft     -- synthesis is in progress or queued, block is not yet visible to consumers.
+-- published -- synthesis is complete and the block is ready for use.
+-- stale     -- a source block used in synthesis has changed and re-synthesis is needed.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS synth_status TEXT DEFAULT NULL
+    CHECK (synth_status IS NULL OR synth_status IN ('draft', 'published', 'stale'));
+
 CREATE INDEX IF NOT EXISTS blocks_doc_content_hash_idx ON blocks (doc_id, content_hash);
 -- Drop and recreate HNSW index to ensure it matches the current embedding dimension (384).
 -- If the column type changes in future, repeat this pattern.
@@ -108,7 +123,7 @@ CREATE TABLE IF NOT EXISTS links (
     dst           UUID NOT NULL REFERENCES blocks(id),
     layer         TEXT NOT NULL
                   CHECK (layer IN ('structural', 'semantic', 'ai')),
-    rel_type      TEXT,                      -- cites, contradicts, elaborates, overrides, supports
+    rel_type      TEXT,                      -- cites, contradicts, elaborates, overrides, supports, sourced-from
     weight        FLOAT DEFAULT 1.0,
     confirmed     BOOLEAN,                   -- null=unreviewed, true=accepted, false=rejected
     provenance    JSONB NOT NULL,            -- {model, version, confidence, created_at}

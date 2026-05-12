@@ -248,9 +248,33 @@ function splitStatements(sql: string): string[] {
   let current = ''
   let inDollarQuote = false
   let dollarTag = ''
+  let inLineComment = false
 
   let i = 0
   while (i < sql.length) {
+    // Handle newline: ends a line comment
+    if (sql[i] === '\n') {
+      inLineComment = false
+      current += sql[i]
+      i++
+      continue
+    }
+
+    // Inside a line comment: copy characters verbatim until newline
+    if (inLineComment) {
+      current += sql[i]
+      i++
+      continue
+    }
+
+    // Detect start of a line comment (-- ...) when not inside a dollar-quoted block
+    if (!inDollarQuote && sql[i] === '-' && sql[i + 1] === '-') {
+      inLineComment = true
+      current += sql[i]
+      i++
+      continue
+    }
+
     // Detect start/end of dollar-quoted strings
     if (!inDollarQuote && sql[i] === '$') {
       const end = sql.indexOf('$', i + 1)
