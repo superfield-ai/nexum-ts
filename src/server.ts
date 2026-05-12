@@ -35,7 +35,7 @@ function matchRoute(method: string, pathname: string): { handler: Handler; param
 export function createApp() {
   return createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*')
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 

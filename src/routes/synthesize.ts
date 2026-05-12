@@ -28,7 +28,7 @@ import { route, send, readBody } from '../server.js'
 import { requireAuth } from '../auth/middleware.js'
 import { getPool } from '../db/pool.js'
 import { writeAgeEdge } from '../db/age.js'
-import { LinkTypes } from '../synthesis/index.js'
+import { LinkTypes, propagateStale } from '../synthesis/index.js'
 import { randomUUID, createHash } from 'node:crypto'
 
 // ---------------------------------------------------------------------------
@@ -217,4 +217,71 @@ route('POST', '/synthesize', async (req, res) => {
     sourced_from: body.source_block_ids,
     status: 'published',
   })
+})
+
+// ---------------------------------------------------------------------------
+// PATCH /blocks/:id/retract
+// ---------------------------------------------------------------------------
+
+/**
+ * PATCH /blocks/:id/retract — mark a source block as retracted and propagate
+ * staleness to all downstream synthesized blocks (issue #112).
+ *
+ * When a source block's content is superseded or retracted, agents or operators
+ * call this endpoint to trigger stale propagation via AGE Cypher. Every
+ * synthesized block that was derived from the named block via a `sourced-from`
+ * edge will have its `synth_status` set to `'stale'`.
+ *
+ * Authentication: caller must supply a Bearer token (or AUTH_OFF=true).
+ * Scope: 'blocks:synthesize' or '*'.
+ *
+ * Path parameter:
+ *   :id — UUID of the source block being retracted / superseded.
+ *
+ * Response (200):
+ *   { id, propagated: true }
+ *
+ * Error codes:
+ *   400 — id not a valid UUID
+ *   401 — not authenticated
+ *   403 — missing blocks:synthesize scope
+ *   404 — block not found
+ *
+ * @see docs/architecture.md — A6 block-level provenance
+ * @see issue #112 — stale propagation
+ */
+route('PATCH', '/blocks/:id/retract', async (req, res, params) => {
+  // 1. Authenticate
+  const principal = await requireAuth(req)
+
+  // 2. Enforce blocks:synthesize scope (same gate as POST /synthesize)
+  const hasScope =
+    principal.scopes.includes('*') || principal.scopes.includes('blocks:synthesize')
+  if (!hasScope) {
+    const err = new Error('forbidden: missing blocks:synthesize scope') as any
+    err.status = 403
+    throw err
+  }
+
+  // 3. Extract block id from matched route params
+  const blockId = params.id ?? ''
+  const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+  if (!UUID_RE.test(blockId)) {
+    return send(res, 400, { error: 'block id must be a valid UUID' })
+  }
+
+  // 4. Verify block exists
+  const pool = await getPool()
+  const { rows } = await pool.query<{ id: string }>(
+    'SELECT id FROM blocks WHERE id = $1',
+    [blockId],
+  )
+  if (rows.length === 0) {
+    return send(res, 404, { error: 'block not found' })
+  }
+
+  // 5. Propagate staleness via AGE Cypher (async — errors are swallowed by propagateStale)
+  await propagateStale(blockId)
+
+  send(res, 200, { id: blockId, propagated: true })
 })
