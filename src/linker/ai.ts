@@ -4,13 +4,10 @@ import { randomUUID } from 'node:crypto'
 import { embedEdge } from './edge-embed.js'
 import { writeAgeEdge } from '../db/age.js'
 import { timeStage } from '../ingest/timing.js'
-// Phase-3 dev-scout (issue #114): bind through the default `InferenceClient`
-// hook so issue #106 can swap in the LocalCpuInferenceClient classification
-// path without touching this file. Today the default backend is the loud
-// stub, so we deliberately do NOT call it from the live link loop yet — the
-// import alone fixes the seam and lets the lint (`scripts/
-// lint-phase2-inference-client.mjs`, broadened in #107) see this module on
-// the inference-client path.
+// Phase-3 (issue #106): AI linker is ported to InferenceClient.classifyLink().
+// The default backend (local-cpu or heuristic fallback) is resolved once at
+// module load via getDefaultInferenceClient(). Call sites no longer use the
+// inline classifyPair heuristic directly in the link loop.
 import { getDefaultInferenceClient } from '../inference/index.js'
 
 export const SIGNALS: Record<string, string[]> = {
@@ -31,14 +28,13 @@ export function classifyPair(contentA: string, contentB: string, cosineSim: numb
 }
 
 /**
- * Phase-3 dev-scout (issue #114): default-binding hook usage.
+ * Phase-3 (issue #106): process-wide default InferenceClient.
  *
- * Resolve (and memoise) the default `InferenceClient` so that the seam is
- * actively touched by the linker. Issue #106 ports the hot loop in
- * `processAiLinks` from the inline `classifyPair` heuristic to
- * `defaultInferenceClient.classifyLink(...)`. While the default backend is
- * still the loud stub (Phase 3, pre-#105), no call site invokes the stub —
- * resolving the client is side-effect-free.
+ * Resolved once at module load. The hot loop in `processAiLinks` calls
+ * `defaultInferenceClient.classifyLink(...)` for each candidate pair instead
+ * of the inline `classifyPair` heuristic. The local-cpu backend is the
+ * default; if model weights are unavailable, the factory automatically wraps
+ * it with a HeuristicInferenceClient fallback (see src/inference/index.ts).
  */
 export const defaultInferenceClient = getDefaultInferenceClient()
 
@@ -81,7 +77,14 @@ export async function processAiLinks(versionId: string): Promise<void> {
 
     for (const candidate of similar) {
       const cosineSim = parseFloat(candidate.sim)
-      const relType = classifyPair(block.content, candidate.content, cosineSim)
+      // Phase-3 (issue #106): route classification through InferenceClient.classifyLink()
+      // instead of the inline classifyPair heuristic. The default client is
+      // local-cpu with automatic heuristic fallback (see src/inference/index.ts).
+      const relType = await defaultInferenceClient.classifyLink({
+        contentA: block.content,
+        contentB: candidate.content,
+        cosineSim,
+      })
       if (!relType) continue
 
       // Edge embedding (issue #75, phase-2): templated string strategy.
