@@ -94,6 +94,28 @@ ALTER TABLE blocks ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'source
 ALTER TABLE blocks ADD COLUMN IF NOT EXISTS synth_status TEXT DEFAULT NULL
     CHECK (synth_status IS NULL OR synth_status IN ('draft', 'published', 'stale'));
 
+-- updated_at: last time this block row was touched (synth_status change, etc.).
+-- Populated by a trigger so write paths do not have to remember to set it.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+
+-- Keep updated_at current whenever any column changes.
+CREATE OR REPLACE FUNCTION blocks_set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS blocks_updated_at_trigger ON blocks;
+CREATE TRIGGER blocks_updated_at_trigger
+    BEFORE UPDATE ON blocks
+    FOR EACH ROW EXECUTE FUNCTION blocks_set_updated_at();
+
+-- Index for the polling cursor (corpus_id resolved via doc join; index on blocks side).
+CREATE INDEX IF NOT EXISTS blocks_updated_at_idx ON blocks (updated_at, id);
+
 CREATE INDEX IF NOT EXISTS blocks_doc_content_hash_idx ON blocks (doc_id, content_hash);
 -- Drop and recreate HNSW index to ensure it matches the current embedding dimension (384).
 -- If the column type changes in future, repeat this pattern.

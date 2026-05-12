@@ -9,6 +9,7 @@ import './routes/entities.js'
 import './routes/embed.js'
 import './routes/query.js'
 import './routes/synthesize.js' // Phase-4 synthesis write-back stubs (issue #115 dev-scout)
+import './routes/blocks.js'    // Phase-4 GET /blocks polling cursor (issue #111)
 import './routes/openapi.js'
 
 await migrate()
