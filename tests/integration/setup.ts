@@ -12,13 +12,23 @@ export async function startDb(): Promise<string> {
       POSTGRES_PASSWORD: 'nexum',
     })
     .withExposedPorts(5432)
-    .withWaitStrategy(Wait.forLogMessage('database system is ready to accept connections'))
+    // Wait for the ready message twice: Postgres prints it once during initdb
+    // (for template1/template0) and again when it actually starts accepting
+    // connections. Waiting for only one occurrence races against the final
+    // startup and causes "Connection terminated unexpectedly" errors.
+    .withWaitStrategy(Wait.forLogMessage('database system is ready to accept connections', 2))
     .start()
 
   const host = container.getHost()
   const port = container.getMappedPort(5432)
   const url = `postgresql://nexum:nexum@${host}:${port}/nexum`
   process.env.DATABASE_URL = url
+
+  // Mutate the in-memory config snapshot so pool.ts and migrate.ts pick up
+  // the testcontainer URL without restarting the process. Mirrors the same
+  // pattern used in startAge() for AGE_DATABASE_URL.
+  const { config } = await import('../../src/config.js')
+  config.DATABASE_URL = url
 
   // Reset pool so next getPool() creates a fresh connection with the new URL
   const { resetPool } = await import('../../src/db/pool.js')
