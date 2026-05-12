@@ -2,7 +2,7 @@
  * Phase-4 synthesis write-back routes (issue #110).
  *
  * POST /synthesize — agent write-back entrypoint.
- * GET  /blocks     — cursor-based polling stub (issue #111 follow-on).
+ * GET  /blocks     — implemented in src/routes/blocks.ts (issue #111).
  *
  * Canonical docs
  * --------------
@@ -216,23 +216,5 @@ route('POST', '/synthesize', async (req, res) => {
     link_ids: linkIds,
     sourced_from: body.source_block_ids,
     status: 'published',
-  })
-})
-
-// ---------------------------------------------------------------------------
-// GET /blocks
-// ---------------------------------------------------------------------------
-
-/**
- * GET /blocks — cursor-based block polling endpoint.
- *
- * Phase-4 stub — returns 501 until issue #111 implements the polling cursor.
- *
- * @see issue #111 — real polling cursor implementation
- */
-route('GET', '/blocks', async (_req, res) => {
-  send(res, 501, {
-    error: 'not_implemented',
-    message: 'GET /blocks is a phase-4 stub — implementation tracked in issue #111',
   })
 })

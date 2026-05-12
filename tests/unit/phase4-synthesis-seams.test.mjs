@@ -128,8 +128,10 @@ test('POST /synthesize route is registered and handles requests (issue #110 impl
   }
 })
 
-test('GET /blocks route stub is registered and returns 501', async () => {
-  await import('../../dist/routes/synthesize.js')
+test('GET /blocks route is implemented and no longer returns 501 (issue #111)', async () => {
+  // Issue #111 replaced the stub with a real implementation in src/routes/blocks.ts.
+  // The route now enforces auth; an unauthenticated request returns 401, not 501.
+  await import('../../dist/routes/blocks.js')
   const { createApp } = await import('../../dist/server.js')
 
   const app = createApp()
@@ -141,11 +143,12 @@ test('GET /blocks route stub is registered and returns 501', async () => {
   })
 
   try {
+    // No auth token → 401 unauthorized (real handler, not 501 stub)
     const resp = await fetch(`http://127.0.0.1:${port}/blocks`)
-    assert.equal(resp.status, 501,
-      'GET /blocks stub must return 501 until issue #111 implements the cursor')
-    const body = await resp.json()
-    assert.equal(body.error, 'not_implemented')
+    assert.notEqual(resp.status, 501,
+      'GET /blocks must no longer return 501 — issue #111 implemented the real handler')
+    // Expect 401 (auth required) rather than 501 (not implemented)
+    assert.equal(resp.status, 401)
   } finally {
     await new Promise(r => app.close(r))
   }
