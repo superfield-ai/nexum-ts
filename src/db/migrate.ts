@@ -5,7 +5,7 @@ import { config } from '../config.js'
 import { createCypherGraphClient, getAgePool } from './age.js'
 
 export async function migrate() {
-  const sql = readFileSync(new URL('../../../db/schema.sql', import.meta.url), 'utf-8')
+  const sql = readFileSync(new URL('../../db/schema.sql', import.meta.url), 'utf-8')
   const pool = await getPool()
   const client = await pool.connect()
   try {
@@ -217,7 +217,7 @@ export function validateLinkRow(row: LinkRow): void {
 
 export async function migrateAge(): Promise<boolean> {
   if (!config.AGE_DATABASE_URL) return false
-  const migrationsDir = new URL('../../../db/migrations/', import.meta.url)
+  const migrationsDir = new URL('../../db/migrations/', import.meta.url)
   const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()
   if (files.length === 0) return false
 
