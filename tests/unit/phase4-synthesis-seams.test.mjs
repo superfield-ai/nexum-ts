@@ -98,8 +98,12 @@ test('POST /synthesize route is registered and handles requests (issue #110 impl
   await import('../../dist/routes/synthesize.js')
   const { createApp } = await import('../../dist/server.js')
 
-  // Auth is off in this unit test environment so principal === 'anon'
-  process.env.NEXUM_AUTH = 'off'
+  // config.AUTH_OFF must be set AFTER the config module is imported (the
+  // env-var is read once at module load time). Mutate the live config object
+  // directly — the same pattern used by integration tests.
+  const { config } = await import('../../dist/config.js')
+  const prevAuthOff = config.AUTH_OFF
+  config.AUTH_OFF = true
 
   const app = createApp()
   const port = await new Promise((resolve, reject) => {
@@ -124,6 +128,7 @@ test('POST /synthesize route is registered and handles requests (issue #110 impl
     // With empty source_block_ids the endpoint returns 400
     assert.equal(resp.status, 400)
   } finally {
+    config.AUTH_OFF = prevAuthOff
     await new Promise(r => app.close(r))
   }
 })
