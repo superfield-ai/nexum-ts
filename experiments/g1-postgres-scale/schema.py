@@ -106,9 +106,12 @@ def _split_statements(sql: str) -> list[str]:
         stripped = line.strip()
 
         if not in_dollar_quote:
-            # Detect opening dollar-quote tag (e.g. $$, $body$, $func$)
+            # Detect opening dollar-quote tag (e.g. $$, $body$, $func$).
+            # Matches both DO $$ ... $$ anonymous blocks and
+            # CREATE OR REPLACE FUNCTION ... AS $$ ... $$ named function bodies.
             match = re.search(r"\$([^$]*)\$", stripped)
-            if match and "DO" in stripped.upper():
+            _upper = stripped.upper()
+            if match and ("DO" in _upper or "AS" in _upper or "LANGUAGE" in _upper):
                 in_dollar_quote = True
                 dollar_tag = match.group(0)  # e.g. "$$" or "$body$"
                 current.append(line)
