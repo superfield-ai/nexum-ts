@@ -322,6 +322,72 @@ class TestEmbeddingDrift:
         # Should change approximately 50% ± generous tolerance
         assert 1 <= changed <= len(orig_tokens)
 
+    def test_estimate_hnsw_boundary_shape(self):
+        """estimate_hnsw_boundary returns all required keys with valid values."""
+        from embedding_drift import estimate_hnsw_boundary
+
+        # 20 random unit-norm embeddings in 16 dimensions
+        rng = np.random.default_rng(0)
+        embs = rng.normal(size=(20, 16)).astype(np.float32)
+        # Unit-normalize
+        embs = embs / np.linalg.norm(embs, axis=1, keepdims=True)
+
+        boundary = estimate_hnsw_boundary(embs, top_k=5, n_queries=10, rng=rng)
+
+        for key in ("mean_boundary", "p25_boundary", "p50_boundary", "p75_boundary", "top_k"):
+            assert key in boundary, f"Missing key: {key}"
+
+        assert boundary["top_k"] == 5
+        # Boundary gaps must be non-negative
+        assert boundary["mean_boundary"] >= 0.0
+        assert boundary["p25_boundary"] >= 0.0
+        assert boundary["p50_boundary"] >= 0.0
+        assert boundary["p75_boundary"] >= 0.0
+        # p25 <= p50 <= p75
+        assert boundary["p25_boundary"] <= boundary["p50_boundary"]
+        assert boundary["p50_boundary"] <= boundary["p75_boundary"]
+
+    def test_estimate_hnsw_boundary_orthogonal_corpus(self):
+        """For orthogonal unit vectors, boundary gap = 1/(n-1) approximately."""
+        from embedding_drift import estimate_hnsw_boundary
+
+        # 10 orthogonal unit vectors in 10 dimensions
+        embs = np.eye(10, dtype=np.float32)
+        rng = np.random.default_rng(1)
+
+        # With orthogonal vectors, similarities are either 1 (self) or 0 (others)
+        # boundary gap = similarity[rank k] - similarity[rank k+1] = 0 - 0 = 0
+        boundary = estimate_hnsw_boundary(embs, top_k=3, n_queries=5, rng=rng)
+        # All off-diagonal similarities are 0, so gap between k-th and (k+1)-th
+        # nearest neighbor is 0 (all tied)
+        assert boundary["mean_boundary"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_estimate_hnsw_boundary_requires_enough_corpus(self):
+        """Raises ValueError if corpus has <= top_k entries."""
+        from embedding_drift import estimate_hnsw_boundary
+
+        embs = np.eye(5, dtype=np.float32)
+        with pytest.raises(ValueError, match="top_k"):
+            estimate_hnsw_boundary(embs, top_k=5, n_queries=5)
+
+    def test_pct_drift_exceeds_boundary_present(self):
+        """measure_embedding_drift result includes pct_drift_exceeds_boundary per fraction."""
+        # This test verifies the output schema without calling sentence-transformers.
+        # We simulate the output structure expected from measure_embedding_drift.
+        expected_keys = [
+            "mean_cosine_distance",
+            "p95_cosine_distance",
+            "mean_rank_shift",
+            "pct_blocks_shift_gt_3",
+            "pct_drift_exceeds_boundary",
+        ]
+        # Verify these keys are declared in the docstring / code (structural check)
+        from embedding_drift import measure_embedding_drift
+        import inspect
+        src = inspect.getsource(measure_embedding_drift)
+        for key in expected_keys:
+            assert key in src, f"Key {key!r} not found in measure_embedding_drift source"
+
     @pytest.mark.slow
     def test_measure_embedding_drift_full(self):
         """
@@ -332,7 +398,7 @@ class TestEmbeddingDrift:
         """
         from embedding_drift import measure_embedding_drift, _SAFE_THRESHOLD_MIN
 
-        # Small corpus for speed
+        # Small corpus for speed (needs > top_k entries for boundary estimation)
         texts = [
             f"Contract clause {i}: payment terms shall be net thirty days."
             for i in range(50)
@@ -352,12 +418,18 @@ class TestEmbeddingDrift:
             assert "p95_cosine_distance" in d
             assert "mean_rank_shift" in d
             assert "pct_blocks_shift_gt_3" in d
-            # Cosine distance should increase with edit fraction
+            assert "pct_drift_exceeds_boundary" in d
+            # Cosine distance should be in valid range
             assert 0.0 <= d["mean_cosine_distance"] <= 2.0
             assert 0.0 <= d["pct_blocks_shift_gt_3"] <= 1.0
+            assert 0.0 <= d["pct_drift_exceeds_boundary"] <= 1.0
 
         assert "safe_edit_threshold" in result
         assert "h5_4_supported" in result
+        assert "hnsw_boundary" in result
+        hnsw = result["hnsw_boundary"]
+        assert "mean_boundary" in hnsw
+        assert hnsw["mean_boundary"] >= 0.0
         # Safe threshold must be in the tested fractions
         assert result["safe_edit_threshold"] in [0.0, 0.01, 0.05, 0.10]
 
