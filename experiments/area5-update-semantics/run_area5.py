@@ -7,15 +7,29 @@ Usage:
       --skip-insertion-latency \\
       --skip-partial-visibility \\
       --output results/area5_results.json
+
+H5.1 results are written through ``experiments._lib.results_writer``
+(ResultEnvelope) so the orchestrator's update-hypothesis-status.sh and
+downstream meta-analyses can parse a single canonical envelope shape.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# Path setup: allow running from repo root or from area5-update-semantics/
+# ---------------------------------------------------------------------------
+_here = os.path.dirname(os.path.abspath(__file__))
+_repo_root = os.path.abspath(os.path.join(_here, "..", ".."))
+for _p in (_repo_root,):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 
 # ---------------------------------------------------------------------------
@@ -145,16 +159,47 @@ def main() -> int:
     if not args.skip_insertion_latency:
         _banner("H5.1 — Insertion-to-Retrieval Latency Breakdown")
         from insertion_latency import measure_insertion_latency  # noqa: PLC0415
-        result = measure_insertion_latency(
+        h5_1_result = measure_insertion_latency(
             nexum_url=args.nexum_url,
             n_single_blocks=args.n_single_blocks,
             n_batch_blocks=args.n_batch_blocks,
             seed=args.seed,
         )
-        all_results["h5_1"] = result
-        print(f"  Bottleneck stage : {result['bottleneck_stage']}")
-        print(f"  Single-block P99 : {result['single_block']['total_ms']['p99_ms']:.1f} ms")
-        print(f"  H5.1 supported   : {result['h5_1_supported']}")
+        all_results["h5_1"] = h5_1_result
+        print(f"  Bottleneck stage : {h5_1_result['bottleneck_stage']}")
+        print(f"  Single-block P99 : {h5_1_result['single_block']['total_ms']['p99_ms']:.1f} ms")
+        print(f"  H5.1 supported   : {h5_1_result['h5_1_supported']}")
+
+        # Write H5.1 result through canonical ResultEnvelope so
+        # update-hypothesis-status.sh and downstream meta-analyses can parse it.
+        try:
+            from experiments._lib.results_writer import ResultEnvelope, write_result  # noqa: PLC0415
+            from experiments._lib.runner import capture_run_context  # noqa: PLC0415
+
+            run_ctx = capture_run_context(gate="H5.1", hypothesis="H5.1", seed=args.seed)
+            bottleneck = h5_1_result["bottleneck_stage"]
+            notes = (
+                f"Bottleneck stage: {bottleneck}. "
+                f"Single-block P99: {h5_1_result['single_block']['total_ms']['p99_ms']:.1f} ms. "
+                f"H5.1 pass criterion (<500 ms P99): {'PASS' if h5_1_result['h5_1_supported'] else 'FAIL'}."
+            )
+            if bottleneck != "index_insert_ms":
+                notes += (
+                    f" NOTE: HNSW insert is NOT the binding constraint — "
+                    f"{bottleneck} dominates. See downstream hypothesis priority queue."
+                )
+            envelope = ResultEnvelope(
+                gate="H5.1",
+                hypothesis="H5.1",
+                passed=h5_1_result["h5_1_supported"],
+                metrics=h5_1_result,
+                runtime=run_ctx,
+                notes=notes,
+            )
+            h5_1_out = write_result(envelope, area_dir=_here)
+            print(f"  H5.1 results written to {h5_1_out}")
+        except ImportError as exc:
+            print(f"  [WARN] Could not write canonical H5.1 result envelope: {exc}")
     else:
         print("\n[SKIP] H5.1 insertion latency (--skip-insertion-latency)")
 
