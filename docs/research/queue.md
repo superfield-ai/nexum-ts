@@ -30,7 +30,10 @@ blocked_on: none
 design_partner_question: "Does your system stay fast enough to use as we grow from a small pilot corpus to our full document archive?"
 kill_criterion_spike: 3 days — build 1M-block and 5M-block synthetic corpora in Postgres + pgvector; measure P99 query latency; pass criterion: P99 < 500ms at 5M blocks on target hardware
 compute_budget: ~20 GPU-hours for corpus generation; PostgreSQL runs on CPU; ~$50 cloud cost
-status: queued
+status: failed
+verdict: FAIL — recursive CTE graph traversal (6-hop) is the binding constraint; P99=3347ms at 100K blocks (6.7× over gate). Semantic (HNSW) and fulltext pass. See H1.1 for full analysis. Binding constraint feeds H5.1.
+issue: 135
+results: experiments/g1-postgres-scale/results/g1_20260514T200417Z.json
 
 ---
 
