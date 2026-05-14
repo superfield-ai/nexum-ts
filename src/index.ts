@@ -2,6 +2,9 @@ import { config } from './config.js'
 import { migrate } from './db/migrate.js'
 import { startupRequireAge } from './db/age.js'
 import { createApp } from './server.js'
+import { runEmbedWorker } from './embed/worker.js'
+import { runStructuralLinker } from './linker/structural.js'
+import { runAiLinker } from './linker/ai.js'
 import './routes/health.js'
 import './routes/corpora.js'
 import './routes/documents.js'
@@ -18,6 +21,14 @@ await migrate()
 // throws when the configured Postgres lacks the AGE extension, refusing to
 // serve traffic against a database that cannot answer graph queries.
 await startupRequireAge()
+
+// Start background workers AFTER AGE is verified so graph writes succeed.
+// Each worker polls its job_queue type in a tight loop; the AbortSignal allows
+// clean shutdown (issue #134 wiring fix).
+const workerAbort = new AbortController()
+runEmbedWorker(workerAbort.signal).catch(err => console.error('embed worker fatal', err))
+runStructuralLinker(workerAbort.signal).catch(err => console.error('structural linker fatal', err))
+runAiLinker(workerAbort.signal).catch(err => console.error('ai linker fatal', err))
 
 const server = createApp()
 server.listen(config.PORT, () => {
