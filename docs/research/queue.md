@@ -150,7 +150,9 @@ blocked_on: G0
 design_partner_question: "Does your system actually understand the difference between a document that contradicts another vs. one that supports it — or is that distinction just metadata?"
 kill_criterion_spike: 5 days — extend G0 model to 100K-block legal corpus; measure cosine distance between contradicts and supports weight vectors after training; significance test p < 0.05
 compute_budget: ~40 GPU-hours (GNN training on 100K blocks); ~$120 cloud cost
-status: blocked
+status: passed
+passed_at: 2026-05-14T19:36:53Z
+results_path: experiments/g3-typed-signal/results/g3_20260514T193653Z.json
 
 ---
 
