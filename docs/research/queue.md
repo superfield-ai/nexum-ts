@@ -72,7 +72,10 @@ blocked_on: G1
 design_partner_question: "Our corpus has PDFs, spreadsheets, and code — does your system handle all of them well, or does it break on certain types?"
 kill_criterion_spike: 5 days — construct a 50K-block mixed-type corpus (legal PDFs + financial tables + code); define cross-type query eval set (50 queries); compare embedding recall@10 vs. graph traversal NDCG@10
 compute_budget: ~15 GPU-hours (embedding 50K blocks + eval); ~$45 cloud cost
-status: queued
+status: failed
+verdict: FAIL (original criterion) — hybrid recall@10 matched semantic (0.075) exactly; the planted target was almost never one hop from semantic top-10. Edge-semantic mode (AGE typed-link embeddings) showed 10× gain (recall@10=0.765 vs 0.075). The original hybrid-expansion operationalisation is refuted; typed-edge embeddings are the productive direction. See H1.2 hypothesis file and issue #138 for full analysis.
+issue: 138
+results: experiments/area1-storage-fitness/results/h1.2_20260510T015402Z.json
 
 ---
 
