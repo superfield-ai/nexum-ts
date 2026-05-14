@@ -48,6 +48,9 @@ jobs:
       - name: Run G1-OPT-1 diagnose_hnsw unit tests (db-free)
         run: python -m pytest experiments/g1-postgres-scale/tests/test_diagnose_hnsw.py -q
 
+      - name: Run G1 generate_corpus and schema unit tests (db-free, issue #135)
+        run: python -m pytest experiments/g1-postgres-scale/tests/test_generate_corpus.py -q
+
       - name: Smoke-test update-hypothesis-status.sh idempotency
         run: |
           set -euo pipefail
