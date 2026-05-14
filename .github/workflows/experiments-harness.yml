@@ -54,6 +54,9 @@ jobs:
       - name: Run G1 generate_corpus and schema unit tests (db-free, issue #135)
         run: python -m pytest experiments/g1-postgres-scale/tests/test_generate_corpus.py -q
 
+      - name: Run H1.2 retrieval comparison unit tests (db-free, issue #138)
+        run: python -m pytest experiments/area1-storage-fitness/tests/test_h12_retrieval.py -q
+
       - name: Smoke-test update-hypothesis-status.sh idempotency
         run: |
           set -euo pipefail

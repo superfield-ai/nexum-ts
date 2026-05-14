@@ -586,12 +586,21 @@ def run_h12(db_url: str, n_blocks: int, n_topics: int, k: int = 10) -> dict[str,
     stats, planted = generate_and_ingest(conn, n_blocks=n_blocks, n_topics=n_topics)
     ingest_seconds = time.perf_counter() - t0
 
-    # Per-mode metrics.
+    # Per-mode metrics — aggregate and per target block-type.
+    # Block types here map to the corpus content types:
+    #   paragraph → prose/document body  (analogous to PDF paragraphs)
+    #   heading   → document structure   (analogous to PDF headings)
+    #   list_item → enumerated content   (analogous to list/table rows)
+    #   table     → tabular data         (analogous to structured tables)
+    # This provides the per-type retrieval breakdown required by H1.2 AC-4.
     per_mode: dict[str, dict[str, Any]] = {}
     for name, fn in MODES.items():
         recalls: list[float] = []
         ndcgs: list[float] = []
         latencies_ms: list[float] = []
+        # Per-target-type buckets for breakdown reporting (AC-4).
+        type_recalls: dict[str, list[float]] = {bt: [] for bt in BLOCK_TYPES}
+        type_ndcgs: dict[str, list[float]] = {bt: [] for bt in BLOCK_TYPES}
         for q in planted:
             t1 = time.perf_counter()
             try:
@@ -603,15 +612,39 @@ def run_h12(db_url: str, n_blocks: int, n_topics: int, k: int = 10) -> dict[str,
                 # preserved instead of crashing the whole comparison.
                 print(f"[h12] {name} query failed: {exc}", file=sys.stderr)
             latencies_ms.append((time.perf_counter() - t1) * 1000.0)
-            recalls.append(recall_at_k(results, q.target_block_id, k))
-            ndcgs.append(ndcg_at_k(results, q.target_block_id, k))
+            r = recall_at_k(results, q.target_block_id, k)
+            n = ndcg_at_k(results, q.target_block_id, k)
+            recalls.append(r)
+            ndcgs.append(n)
+            # Bucket by target block type for per-type breakdown.
+            if q.target_block_type in type_recalls:
+                type_recalls[q.target_block_type].append(r)
+                type_ndcgs[q.target_block_type].append(n)
         arr_lat = np.array(latencies_ms)
+        # Aggregate per-type breakdown.
+        per_target_type: dict[str, dict[str, Any]] = {}
+        for bt in BLOCK_TYPES:
+            bt_r = type_recalls[bt]
+            bt_n = type_ndcgs[bt]
+            if bt_r:
+                per_target_type[bt] = {
+                    "recall_at_10": float(np.mean(bt_r)),
+                    "ndcg_at_10": float(np.mean(bt_n)),
+                    "n_queries": len(bt_r),
+                }
+            else:
+                per_target_type[bt] = {
+                    "recall_at_10": None,
+                    "ndcg_at_10": None,
+                    "n_queries": 0,
+                }
         per_mode[name] = {
             "recall_at_10": float(np.mean(recalls)) if recalls else 0.0,
             "ndcg_at_10": float(np.mean(ndcgs)) if ndcgs else 0.0,
             "p50_ms": float(np.percentile(arr_lat, 50)) if recalls else 0.0,
             "p99_ms": float(np.percentile(arr_lat, 99)) if recalls else 0.0,
             "n_queries": len(recalls),
+            "per_target_type": per_target_type,
         }
 
     # H1.2 acceptance: graph-expanded (hybrid) recall@10 must beat semantic by > 15%.
