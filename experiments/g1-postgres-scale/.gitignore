@@ -2,4 +2,3 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
-results/g1_result.json
