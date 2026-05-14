@@ -6,6 +6,7 @@ import { parsePdf } from '../ingest/parse-pdf.js'
 import { parseDocx } from '../ingest/parse-docx.js'
 import { contentHash } from '../ingest/dedup.js'
 import { timeStage } from '../ingest/timing.js'
+import { enqueueJob } from '../db/jobs.js'
 import type { ParsedBlock } from '../ingest/parse-text.js'
 
 route('POST', '/documents', async (req, res) => {
@@ -111,6 +112,10 @@ route('POST', '/documents', async (req, res) => {
     )
 
     await client.query('COMMIT')
+
+    // Enqueue embed job so the typed-link pipeline (embed → structural → AI)
+    // auto-populates for every newly ingested document (issue #134).
+    await enqueueJob('embed-version', { version_id: versionId })
 
     send(res, 202, {
       id: docId,
