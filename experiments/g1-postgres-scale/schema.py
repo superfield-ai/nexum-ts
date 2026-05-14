@@ -55,15 +55,38 @@ def ensure_schema(conn, schema_sql_path: str = _DEFAULT_SCHEMA_PATH) -> None:
             stmt = stmt.strip()
             if not stmt:
                 continue
-            # Strip leading comment lines so a statement like
-            # "-- comment\nCREATE TABLE..." is not skipped.
-            sql_only = "\n".join(
-                line for line in stmt.splitlines() if not line.strip().startswith("--")
+            # Strip leading comment lines so multi-line statements that begin
+            # with a `-- comment` are not skipped by the `startswith('--')`
+            # heuristic. (Bug discovered while diagnosing issue #73 — the
+            # `CREATE TABLE blocks` and `DROP/CREATE INDEX ... hnsw` blocks
+            # were being silently dropped because their first line was a
+            # comment, leaving the benchmark with no HNSW index and a
+            # parallel-seq-scan ANN path.)
+            executable = "\n".join(
+                line for line in stmt.splitlines()
+                if line.strip() and not line.strip().startswith("--")
             ).strip()
-            if not sql_only:
+            if not executable:
                 continue
             cur.execute(stmt)
+
     conn.commit()
+
+    # Defensive check: the HNSW index is the contract surface tested by the
+    # G1 gate (issue #73). If it's missing after schema apply, the loader
+    # has silently dropped a statement and downstream benchmarks will
+    # report sequential-scan latency as if it were ANN performance.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM pg_class WHERE relname = 'blocks_embedding_hnsw_idx' "
+            "AND relkind = 'i'"
+        )
+        if cur.fetchone() is None:
+            raise RuntimeError(
+                "schema apply did not create blocks_embedding_hnsw_idx — "
+                "ANN benchmarks would fall back to sequential scan. See "
+                "experiments/g1-postgres-scale/results/postgres_config.md."
+            )
 
 
 def _split_statements(sql: str) -> list[str]:

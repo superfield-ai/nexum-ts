@@ -309,3 +309,45 @@ class TestAuditabilityReport:
 
         assert result["nexum_more_auditable"] is True
         assert "h4_1_signal" in result
+
+
+# ---------------------------------------------------------------------------
+# H4.2 multi-hop runner (synthetic-corpus structural tests, no embedder)
+# ---------------------------------------------------------------------------
+
+class TestMultihopRunner:
+    """Structural tests for run_h4_2_multihop (no sentence-transformers needed)."""
+
+    def test_synthetic_corpus_has_link_chains_long_enough(self):
+        from run_h4_2_multihop import _build_synthetic_corpus
+
+        blocks = _build_synthetic_corpus(n_contracts=30, seed=42)
+        # 30 contracts * 6 clause kinds
+        assert len(blocks) == 180
+        by_id = {b.block_id: b for b in blocks}
+        # Walk B0 chain 5 hops from K-000 — must succeed.
+        cur = by_id["K-000::B0"]
+        for _ in range(5):
+            assert cur.links_out, f"chain truncated at {cur.block_id}"
+            cur = by_id[cur.links_out[0]]
+        assert cur.doc_id != "K-000"
+
+    def test_question_set_covers_all_target_hop_depths(self):
+        from run_h4_2_multihop import _build_synthetic_corpus, _build_question_set
+
+        blocks = _build_synthetic_corpus(n_contracts=30, seed=42)
+        qs = _build_question_set(blocks, seed=7, n_per_hop=25)
+        depths = {q.n_hops for q in qs}
+        assert depths == {2, 3, 4, 5}
+        # Each bucket should be at full size (25) given a 30-contract corpus.
+        for d in (2, 3, 4, 5):
+            bucket = [q for q in qs if q.n_hops == d]
+            assert len(bucket) == 25, f"hop {d} bucket is {len(bucket)}"
+        # Required-doc count equals n_hops + 1.
+        for q in qs:
+            assert len(q.required_doc_ids) == q.n_hops + 1
+        # Gold span really lives in the tail block.
+        by_id = {b.block_id: b for b in blocks}
+        for q in qs:
+            tail = by_id[q.chain[-1]]
+            assert q.gold_span in tail.text

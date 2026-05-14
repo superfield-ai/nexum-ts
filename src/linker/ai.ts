@@ -1,6 +1,14 @@
 import { claimJob, completeJob, failJob } from '../db/jobs.js'
 import { query, execute } from '../db/queries.js'
 import { randomUUID } from 'node:crypto'
+import { embedEdge } from './edge-embed.js'
+import { writeAgeEdge } from '../db/age.js'
+import { timeStage } from '../ingest/timing.js'
+// Phase-3 (issue #106): AI linker is ported to InferenceClient.classifyLink().
+// The default backend (local-cpu or heuristic fallback) is resolved once at
+// module load via getDefaultInferenceClient(). Call sites no longer use the
+// inline classifyPair heuristic directly in the link loop.
+import { getDefaultInferenceClient } from '../inference/index.js'
 
 export const SIGNALS: Record<string, string[]> = {
   contradicts:      ['not ', 'however', 'contrary', 'but ', 'instead', 'unlike', 'disagrees', 'conflicts'],
@@ -18,6 +26,17 @@ export function classifyPair(contentA: string, contentB: string, cosineSim: numb
   }
   return cosineSim > 0.85 ? 'supports' : null
 }
+
+/**
+ * Phase-3 (issue #106): process-wide default InferenceClient.
+ *
+ * Resolved once at module load. The hot loop in `processAiLinks` calls
+ * `defaultInferenceClient.classifyLink(...)` for each candidate pair instead
+ * of the inline `classifyPair` heuristic. The local-cpu backend is the
+ * default; if model weights are unavailable, the factory automatically wraps
+ * it with a HeuristicInferenceClient fallback (see src/inference/index.ts).
+ */
+export const defaultInferenceClient = getDefaultInferenceClient()
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)) }
 
@@ -58,22 +77,43 @@ export async function processAiLinks(versionId: string): Promise<void> {
 
     for (const candidate of similar) {
       const cosineSim = parseFloat(candidate.sim)
-      const relType = classifyPair(block.content, candidate.content, cosineSim)
+      // Phase-3 (issue #106): route classification through InferenceClient.classifyLink()
+      // instead of the inline classifyPair heuristic. The default client is
+      // local-cpu with automatic heuristic fallback (see src/inference/index.ts).
+      const relType = await defaultInferenceClient.classifyLink({
+        contentA: block.content,
+        contentB: candidate.content,
+        cosineSim,
+      })
       if (!relType) continue
 
-      await execute(
-        `INSERT INTO links (id, src, dst, layer, rel_type, weight, confirmed, provenance)
-         VALUES ($1, $2, $3, 'ai', $4, $5, null, $6)
-         ON CONFLICT DO NOTHING`,
-        [
-          randomUUID(),
-          block.id,
-          candidate.id,
-          relType,
-          cosineSim,
-          JSON.stringify({ model: 'keyword-heuristics-v1', confidence: cosineSim, created_at: new Date().toISOString() })
-        ]
+      // Edge embedding (issue #75, phase-2): templated string strategy.
+      // Wrapped in timeStage so #12 (H5.1) can observe per-edge embed cost.
+      const edgeVec = await timeStage('edge_embed', { docId: block.doc_id, blockCount: 1 }, () =>
+        embedEdge(block.content, candidate.content, relType),
       )
+
+      await execute(
+        `INSERT INTO links (id, src, dst, layer, rel_type, weight, confirmed, provenance, edge_embedding)
+         VALUES ($1, $2, $3, 'ai', $4, $5, null, $6, ${edgeVec ? '$7::vector' : 'NULL'})
+         ON CONFLICT DO NOTHING`,
+        edgeVec
+          ? [
+              randomUUID(), block.id, candidate.id, relType, cosineSim,
+              JSON.stringify({ model: 'keyword-heuristics-v1', confidence: cosineSim, created_at: new Date().toISOString() }),
+              edgeVec,
+            ]
+          : [
+              randomUUID(), block.id, candidate.id, relType, cosineSim,
+              JSON.stringify({ model: 'keyword-heuristics-v1', confidence: cosineSim, created_at: new Date().toISOString() }),
+            ],
+      )
+
+      // Mirror the edge into the AGE graph (the canonical graph store after
+      // the phase-1 cutover, issue #99). AGE is required at boot, so this
+      // call is expected to succeed; transient failures return false and are
+      // logged but do not abort the linker batch.
+      await writeAgeEdge({ src: block.id, dst: candidate.id, layer: 'ai', relType, weight: cosineSim })
     }
   }
 }

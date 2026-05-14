@@ -151,15 +151,19 @@ Each link carries a `confidence` score (0–1) and a `mechanism` field (`structu
 
 ### 5. Query API
 
-Three query modes, all returning block IDs with relevance scores and link context:
+Two first-class retrieval modes plus their composition, all returning block IDs (or link IDs, for edge-targeted vector queries) with relevance scores and link context:
 
-- **Semantic search** — natural language query against the embedding index; returns ranked blocks with connected neighbors
-- **Full-text search** — keyword and phrase search via tsvector indexing
-- **Graph traversal** — walk the link graph from a seed block; configurable depth, link-type filters, and direction (forward / backward / both)
+- **Vector search** (`mode: "vector"`) — natural language query against the embedding index. The `target` parameter selects the embedding space:
+  - `target: "blocks"` (default) — cosine similarity over block embeddings; returns ranked blocks with connected neighbours.
+  - `target: "edges"` — cosine similarity over edge embeddings; returns ranked typed links. Either a free-text `query` or a structured `(src_text, dst_text, rel_hint?)` triple may be supplied; the triple is embedded with the same template the linker uses at write time.
+- **Graph traversal** (`mode: "graph"`) — walk the link graph from a seed block; configurable depth, link-type filters, and direction (forward / backward / both).
+- **Hybrid** (`mode: "hybrid"`) — vector-ANN seed followed by one-hop graph expansion through the typed-link graph.
 
-Results across all modes include provenance: who created each link, when, and with what confidence.
+`semantic` is accepted as a backward-compat alias for `vector`. Results across all modes include provenance: who created each link, when, and with what confidence.
 
-**Edge embeddings.** Both nodes (blocks) and edges (links) carry vector embeddings. A semantic query can therefore surface relevant *relationships*, not just relevant blocks. For example: a query for "obligations that override earlier commitments" can match `overrides` links whose embedded representation scores highly against that query, independent of whether the individual blocks rank well in isolation. This makes the graph traversable by meaning, not just by structure.
+**Edge embeddings.** Both nodes (blocks) and edges (links) carry vector embeddings. A vector query with `target: "edges"` can therefore surface relevant *relationships*, not just relevant blocks. For example: a query for "obligations that override earlier commitments" can match `overrides` links whose embedded representation scores highly against that query, independent of whether the individual blocks rank well in isolation. This makes the graph traversable by meaning, not just by structure.
+
+**Internal signals.** The tsvector index on block content and the edge-embedding column on links remain part of the storage layer. They are reachable through internal helpers and experiment harnesses but are not exposed as public Query API modes; the prior `fulltext` and `edge_semantic` mode names are no longer accepted.
 
 ### 6. Polling Cursor
 

@@ -79,6 +79,23 @@ python3 -m pytest tests/ -v
 7. `pass_g3 = True` iff `mannwhitney_p_value < 0.05`
 8. Type embedding vectors diverge from initialization after 100 training steps
 
+## Scale Gap (Honest Report)
+
+H7.2 targets a **100K-block** corpus. The shipped G3 spike result is at
+**5K blocks / 500 Adam steps** (CPU, ~25s training time) — this is the
+scale at which the spike completes within the per-issue time budget.
+
+The 5K result is a **partial** confirmation: it demonstrates that the
+TypedLinkGraphModel optimizer differentiates the 5 edge types
+(p < 1e-6, separation_ratio ~5.1) at small scale. Whether the same
+separation holds — or collapses — at 100K blocks must be re-confirmed
+in Area 7 integration before treating H7.2 as fully established.
+
+A larger 25K-block / 300-step run was previously executed (see
+`results/g3_25k.log`) and also produced p < 1e-6, separation_ratio ~5.0,
+which suggests the signal scales monotonically, but a true 100K run
+remains future work attached to Area 7.
+
 ## Decision Outcome
 
 | Result | Consequence |

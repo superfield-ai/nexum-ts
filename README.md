@@ -9,7 +9,7 @@ See [`docs/engineering.md`](docs/engineering.md) for the full data model and que
 ## Prerequisites
 
 - **Node.js** ≥ 20
-- **Docker** — used to run PostgreSQL with pgvector
+- **Docker** — used to run PostgreSQL with Apache AGE + pgvector (`apache/age:PG16_latest`)
 - **pdftotext** (poppler-utils) — optional, for PDF ingestion
 
 Embeddings are computed locally via [`@xenova/transformers`](https://github.com/xenova/transformers.js) — no external API keys required.
@@ -24,10 +24,12 @@ git clone git@github.com:superfield-ai/nexum.git
 cd nexum
 npm install
 
-# 2. Start Postgres with pgvector
-docker run -d --name nexum-pg \
-  -e POSTGRES_DB=nexum -e POSTGRES_USER=nexum -e POSTGRES_PASSWORD=nexum \
-  -p 5432:5432 ankane/pgvector
+# 2. Start Postgres + Apache AGE (the only supported image post-phase-1)
+docker compose up -d postgres
+# (or, equivalently, run the image directly:)
+# docker run -d --name nexum-pg \
+#   -e POSTGRES_DB=nexum -e POSTGRES_USER=nexum -e POSTGRES_PASSWORD=nexum \
+#   -p 5432:5432 apache/age:PG16_latest
 
 # 3. Configure environment
 cp .env.example .env
@@ -60,7 +62,7 @@ A static copy lives at [`openapi.json`](./openapi.json) in the repo root.
 | `POST` | `/corpora` | Create a document corpus |
 | `GET` | `/corpora/:id` | Get corpus by ID |
 | `POST` | `/documents` | Ingest a document (returns block count) |
-| `POST` | `/query` | Query across blocks (fulltext / semantic / graph / hybrid) |
+| `POST` | `/query` | Query across blocks (vector / graph / hybrid) |
 | `POST` | `/blocks/embed` | Embed a text snippet |
 | `POST` | `/entities` | Create an entity (user or agent) |
 | `GET` | `/openapi.json` | OpenAPI spec |
@@ -70,7 +72,7 @@ A static copy lives at [`openapi.json`](./openapi.json) in the repo root.
 ```bash
 curl -s -X POST http://localhost:3000/query \
   -H 'Content-Type: application/json' \
-  -d '{"corpus_id":"<id>","query":"indemnification","mode":"fulltext"}'
+  -d '{"corpus_id":"<id>","query":"indemnification","mode":"vector"}'
 ```
 
 ---

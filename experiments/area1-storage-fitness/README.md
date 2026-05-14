@@ -13,6 +13,17 @@ dimension ablation.
 | `embedding_ablation.py` | Recall@10 across 512/768/1024/1536 dims on BEIR (nfcorpus, fiqa); minimum viable dimensionality |
 | `report.py` | Converts results dict → Markdown report with tables |
 | `run_area1.py` | Orchestrator CLI |
+| `h12_retrieval_comparison.py` | H1.2 cross-type retrieval comparison across fulltext / semantic / graph_only / hybrid / edge_semantic on a 50K mixed-type planted-answer corpus. Writes an `H1.2` envelope via `experiments._lib.results_writer`. |
+
+### H1.2 retrieval comparison (issue #6)
+
+```bash
+DATABASE_URL=postgresql://nexum:nexum@localhost:5433/nexum_bench \
+  python experiments/area1-storage-fitness/h12_retrieval_comparison.py \
+  --n-blocks 50000 --n-topics 400 --write-results
+```
+
+Outputs per-mode recall@10 / NDCG@10 / p50 ms / p99 ms and writes a result envelope to `results/h1.2_<timestamp>.json`. See `docs/research/hypotheses/H1.2_graph-beats-semantic-cross-type.md` for interpretation.
 
 ## Dependencies
 

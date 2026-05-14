@@ -21,31 +21,66 @@ test('query route is imported in src/index.ts', () => {
   )
 })
 
-test('query route source contains all four modes', () => {
+test('query route source dispatches the phase-2 public modes (issue #104)', () => {
   const srcPath = path.resolve(__dirname, '../../src/routes/query.ts')
   const contents = fs.readFileSync(srcPath, 'utf8')
 
-  assert.ok(contents.includes("mode === 'semantic'"), "should handle semantic mode")
-  assert.ok(contents.includes("mode === 'fulltext'"), "should handle fulltext mode")
+  // Public contract: vector | graph | hybrid, with `semantic` as a
+  // backward-compat alias for `vector`.
+  assert.ok(contents.includes("mode === 'semantic'"), "should accept semantic alias")
+  assert.ok(contents.includes("mode === 'vector'"), "should handle vector mode")
   assert.ok(contents.includes("mode === 'graph'"), "should handle graph mode")
   assert.ok(contents.includes("mode === 'hybrid'"), "should handle hybrid mode")
+
+  // Deprecated public modes must short-circuit with a 400 instead of being
+  // dispatched to a handler.
+  assert.ok(
+    !contents.includes("mode === 'fulltext'"),
+    "fulltext must no longer be dispatched as a public mode",
+  )
+  assert.ok(
+    !contents.includes("mode === 'edge_semantic'"),
+    "edge_semantic must no longer be dispatched as a public mode",
+  )
+  assert.ok(
+    contents.includes("DEPRECATED_MODES") && contents.includes("'fulltext'") && contents.includes("'edge_semantic'"),
+    "deprecated mode names must be tracked in the rejection set",
+  )
 })
 
-test('graph mode source uses recursive CTE with depth tracking', () => {
+test('graph mode source issues a Cypher query through the AGE adapter (issue #101)', () => {
   const srcPath = path.resolve(__dirname, '../../src/routes/query.ts')
   const contents = fs.readFileSync(srcPath, 'utf8')
 
-  assert.ok(contents.includes('WITH RECURSIVE graph'), 'graphSearch should use a recursive CTE')
-  assert.ok(contents.includes('g.depth'), 'graphSearch result should include depth')
-  assert.ok(contents.includes('g.rel_type'), 'graphSearch result should include rel_type')
+  // Phase-1 cutover: graphSearch now traverses the AGE `nexum_links` graph
+  // via Cypher rather than running a recursive CTE against the `links` table.
+  assert.ok(
+    contents.includes("from '../db/age.js'") || contents.includes('from "../db/age.js"'),
+    'graphSearch should import the AGE adapter'
+  )
+  assert.ok(contents.includes("cypher('nexum_links'"), 'graphSearch should issue a Cypher call against the nexum_links graph')
+  assert.ok(contents.includes('[r:LINK*1..'), 'graphSearch should use a variable-length LINK pattern')
+  assert.ok(!contents.includes('WITH RECURSIVE graph'), 'graphSearch must no longer use the recursive CTE')
+  assert.ok(contents.includes('depth'), 'graphSearch result should include depth')
+  assert.ok(contents.includes('rel_type'), 'graphSearch result should include rel_type')
 })
 
-test('hybrid mode source performs semantic search then graph expansion', () => {
+test('hybrid mode source performs semantic search then AGE Cypher one-hop expansion', () => {
+  // Issue #102: the recursive-CTE neighbour expansion was replaced by a
+  // single Cypher one-hop through the AGE adapter. The vector-ANN seed step
+  // is unchanged. Keep the public origin tags so clients keep working.
   const srcPath = path.resolve(__dirname, '../../src/routes/query.ts')
   const contents = fs.readFileSync(srcPath, 'utf8')
 
   assert.ok(contents.includes('semanticSearch(corpusId'), 'hybridSearch should call semanticSearch')
-  assert.ok(contents.includes('graphSearch(sr.block_id'), 'hybridSearch should call graphSearch per semantic result')
+  assert.ok(
+    contents.includes('oneHopNeighborsFromAge('),
+    'hybridSearch should expand neighbours through the AGE Cypher one-hop helper',
+  )
+  assert.ok(
+    !contents.match(/hybridSearch[\s\S]*?graphSearch\(sr\.block_id/),
+    'hybridSearch must no longer delegate to the recursive-CTE graphSearch path',
+  )
   assert.ok(contents.includes("origin: 'semantic'"), "hybrid results should tag semantic origin")
   assert.ok(contents.includes("origin: 'graph'"), "hybrid results should tag graph origin")
 })

@@ -4,8 +4,16 @@ eval_losslessness.py — Round-trip accuracy comparison for G4.
 Compares PyTorch model outputs vs. ONNX Runtime (or NumPy fallback) outputs
 on a held-out eval set.
 
-Pass criterion (H7.3):
-    accuracy_delta < 0.01  (< 1% accuracy delta)
+Pass criterion (H7.3 / G4 issue #5):
+    accuracy_delta < 0.01      (< 1% accuracy delta)
+    AND
+    f1_delta       < 0.01      (< 1% attribution F1 delta)
+
+The accuracy threshold restates the issue body's pass criterion. The F1
+threshold tracks the orchestrator's "attribution F1" framing — for the
+binary contradiction-detection task here, predicted positives constitute
+the model's attribution set, so binary F1 of the positive class is the
+natural attribution-F1 surrogate.
 
 This is NOT a distillation comparison. The ONNX model contains the same
 parameters as the live PyTorch model. The only possible deviation is:
@@ -39,8 +47,32 @@ except ImportError as e:
     raise ImportError("torch-geometric is required. pip install torch-geometric") from e
 
 
-# Pass threshold: < 1% accuracy delta.
+# Pass threshold: < 1% accuracy delta and < 1% F1 delta.
 PASS_THRESHOLD = 0.01
+F1_PASS_THRESHOLD = 0.01
+
+
+def _binary_f1(preds: np.ndarray, labels: np.ndarray) -> float:
+    """
+    Binary F1 of the positive class (label==1).
+
+    Returns 0.0 if there are no predicted positives AND no actual positives
+    (degenerate case; a perfectly empty prediction on an empty positive set
+    has no F1 defined — we report 0.0 by convention to avoid NaN-poisoning
+    the delta).
+    """
+    preds_b = preds.astype(bool)
+    labels_b = labels.astype(bool)
+    tp = float(np.sum(preds_b & labels_b))
+    fp = float(np.sum(preds_b & ~labels_b))
+    fn = float(np.sum(~preds_b & labels_b))
+    if tp + fp == 0.0 or tp + fn == 0.0:
+        return 0.0
+    precision = tp / (tp + fp)
+    recall = tp / (tp + fn)
+    if precision + recall == 0.0:
+        return 0.0
+    return float(2.0 * precision * recall / (precision + recall))
 
 
 def evaluate_losslessness(
@@ -154,15 +186,26 @@ def evaluate_losslessness(
     mean_logit_diff = float(logit_diff.mean())
 
     accuracy_delta = abs(accuracy_pytorch - accuracy_onnx)
-    pass_g4 = accuracy_delta < PASS_THRESHOLD
+
+    # Attribution F1 (binary positive-class F1) on each runtime.
+    f1_pytorch = _binary_f1(preds_pt, pair_labels_np)
+    f1_onnx = _binary_f1(preds_onnx, pair_labels_np)
+    f1_delta = abs(f1_pytorch - f1_onnx)
+
+    pass_g4 = (accuracy_delta < PASS_THRESHOLD) and (f1_delta < F1_PASS_THRESHOLD)
 
     return {
         "accuracy_pytorch": accuracy_pytorch,
         "accuracy_onnx": accuracy_onnx,
         "accuracy_delta": accuracy_delta,
+        "f1_pytorch": f1_pytorch,
+        "f1_onnx": f1_onnx,
+        "f1_delta": f1_delta,
         "max_logit_diff": max_logit_diff,
         "mean_logit_diff": mean_logit_diff,
         "pass_g4": pass_g4,
+        "pass_threshold_accuracy": PASS_THRESHOLD,
+        "pass_threshold_f1": F1_PASS_THRESHOLD,
         "n_eval_pairs": actual_n,
     }
 
@@ -196,12 +239,21 @@ def evaluate_losslessness_from_logits(
 
     logit_diff = np.abs(logits_pytorch - logits_onnx)
 
+    f1_pytorch = _binary_f1(preds_pt, labels)
+    f1_onnx = _binary_f1(preds_onnx, labels)
+    f1_delta = abs(f1_pytorch - f1_onnx)
+
     return {
         "accuracy_pytorch": accuracy_pytorch,
         "accuracy_onnx": accuracy_onnx,
         "accuracy_delta": accuracy_delta,
+        "f1_pytorch": f1_pytorch,
+        "f1_onnx": f1_onnx,
+        "f1_delta": f1_delta,
         "max_logit_diff": float(logit_diff.max()),
         "mean_logit_diff": float(logit_diff.mean()),
-        "pass_g4": accuracy_delta < PASS_THRESHOLD,
+        "pass_g4": (accuracy_delta < PASS_THRESHOLD) and (f1_delta < F1_PASS_THRESHOLD),
+        "pass_threshold_accuracy": PASS_THRESHOLD,
+        "pass_threshold_f1": F1_PASS_THRESHOLD,
         "n_eval_pairs": len(labels),
     }

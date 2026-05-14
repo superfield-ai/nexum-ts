@@ -47,7 +47,7 @@ async function main() {
   }
 
   console.log(`\nDone! Corpus ID: ${corpus.id}`)
-  console.log(`Try: curl -s -X POST ${BASE_URL}/query -H 'Content-Type: application/json' -d '{"corpus_id":"${corpus.id}","query":"indemnification","mode":"fulltext"}'`)
+  console.log(`Try: curl -s -X POST ${BASE_URL}/query -H 'Content-Type: application/json' -d '{"corpus_id":"${corpus.id}","query":"indemnification","mode":"vector"}'`)
 }
 
 main().catch(err => { console.error(err); process.exit(1) })

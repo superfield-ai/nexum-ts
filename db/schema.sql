@@ -79,6 +79,43 @@ CREATE TABLE IF NOT EXISTS blocks (
     meta            JSONB                    -- raw_refs, section context, page, etc.
 );
 
+-- Phase-4 synthesis write-back columns (issue #109).
+-- origin: how this block came to exist in the corpus.
+--   source      -- ingested directly from a source document (default for all pre-phase-4 blocks).
+--   synthesized -- written back by the agent layer via POST /synthesize.
+--   external    -- imported from an external system, not synthesized by this platform.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'source'
+    CHECK (origin IN ('source', 'synthesized', 'external'));
+
+-- synth_status: lifecycle state for synthesized blocks (null for source/external blocks).
+-- draft     -- synthesis is in progress or queued, block is not yet visible to consumers.
+-- published -- synthesis is complete and the block is ready for use.
+-- stale     -- a source block used in synthesis has changed and re-synthesis is needed.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS synth_status TEXT DEFAULT NULL
+    CHECK (synth_status IS NULL OR synth_status IN ('draft', 'published', 'stale'));
+
+-- updated_at: last time this block row was touched (synth_status change, etc.).
+-- Populated by a trigger so write paths do not have to remember to set it.
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+
+-- Keep updated_at current whenever any column changes.
+CREATE OR REPLACE FUNCTION blocks_set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS blocks_updated_at_trigger ON blocks;
+CREATE TRIGGER blocks_updated_at_trigger
+    BEFORE UPDATE ON blocks
+    FOR EACH ROW EXECUTE FUNCTION blocks_set_updated_at();
+
+-- Index for the polling cursor (corpus_id resolved via doc join; index on blocks side).
+CREATE INDEX IF NOT EXISTS blocks_updated_at_idx ON blocks (updated_at, id);
+
 CREATE INDEX IF NOT EXISTS blocks_doc_content_hash_idx ON blocks (doc_id, content_hash);
 -- Drop and recreate HNSW index to ensure it matches the current embedding dimension (384).
 -- If the column type changes in future, repeat this pattern.
@@ -108,7 +145,7 @@ CREATE TABLE IF NOT EXISTS links (
     dst           UUID NOT NULL REFERENCES blocks(id),
     layer         TEXT NOT NULL
                   CHECK (layer IN ('structural', 'semantic', 'ai')),
-    rel_type      TEXT,                      -- cites, contradicts, elaborates, overrides, supports
+    rel_type      TEXT,                      -- cites, contradicts, elaborates, overrides, supports, sourced-from
     weight        FLOAT DEFAULT 1.0,
     confirmed     BOOLEAN,                   -- null=unreviewed, true=accepted, false=rejected
     provenance    JSONB NOT NULL,            -- {model, version, confidence, created_at}
@@ -119,6 +156,25 @@ CREATE INDEX IF NOT EXISTS links_src_idx ON links (src);
 CREATE INDEX IF NOT EXISTS links_dst_idx ON links (dst);
 CREATE INDEX IF NOT EXISTS links_src_layer_idx ON links (src, layer);
 CREATE INDEX IF NOT EXISTS links_dst_layer_idx ON links (dst, layer);
+
+-- Edge-embedding stub column — phase-1 dev-scout (issue #78), to be populated by #75.
+--
+-- This column is intentionally created NULL for every row at scout time. No
+-- ingest path or query path reads or writes it yet. It exists so that #75
+-- (AGE integration / edge-embedding writes) and downstream consumers can rely
+-- on a stable column name and dimension without coordinating a schema change.
+--
+-- Dimension matches the block embedding (384, all-MiniLM-L6-v2) so that early
+-- experiments can construct edge vectors as element-wise functions of the two
+-- endpoint block vectors. The dimension may be revisited once #75 chooses a
+-- production edge-encoder. See docs/research.md (Area 1) and
+-- docs/engineering.md (Phase-1 Scout Seams) for the seam contract.
+ALTER TABLE links ADD COLUMN IF NOT EXISTS edge_embedding vector(384);
+
+-- HNSW index on edge embeddings (issue #75, phase-2). Cosine ops to mirror
+-- block-embedding usage so the query planner picks the same operator class.
+CREATE INDEX IF NOT EXISTS links_edge_embedding_hnsw_idx
+    ON links USING hnsw (edge_embedding vector_cosine_ops);
 
 -- Entities: users and agents that can authenticate via API key
 CREATE TABLE IF NOT EXISTS entities (

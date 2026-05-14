@@ -297,3 +297,81 @@ Concurrency: [1 / 8 / 32 / 128 concurrent clients — report the full sweep]
 Corpus size at test time: [must match the target deployment scale]
 Cache state: [cold start vs. warmed cache — run both; report separately]
 ```
+
+---
+
+## Phase-0 Gate Verification Harness
+
+Phase-0 contains four gate experiments (#73 G0, #74 G1, #4 H1.1, #3 G4)
+that must emit comparable JSON artifacts. The shared seam is the
+`experiments._lib` package, scouted by issue #77 and lives at
+`experiments/_lib/`.
+
+### Components
+
+- `experiments/_lib/runner.py` — `capture_run_context(gate, hypothesis, seed,
+  image_digest=None)` returns a `RunContext` with hardware profile,
+  Python/torch versions, accelerator info, RAM, hostname, git SHA,
+  Docker image digest, and an env-var allowlist snapshot.
+- `experiments/_lib/results_writer.py` — `ResultEnvelope` dataclass plus
+  `write_result(envelope, area_dir)` which writes
+  `experiments/<area>/results/<gate>_<UTC-timestamp>.json` in the
+  canonical envelope shape.
+- `scripts/update-hypothesis-status.sh` — flips the YAML frontmatter
+  `status` field of a hypothesis markdown file (e.g. `H1.1.md`) from
+  `untested` to `passed` or `failed`, recording `last_tested` (UTC
+  ISO-8601) and `results_path`. Idempotent: re-running with identical
+  arguments produces a byte-identical file.
+
+### Canonical envelope shape
+
+```json
+{
+  "schema_version": 1,
+  "gate": "G0|G1|G4|H1.1|...",
+  "hypothesis": "H7.1",
+  "pass": true,
+  "metrics": { "...gate-specific metric block..." },
+  "runtime": { "...RunContext.to_dict()..." },
+  "results_path": "experiments/<area>/results/<gate>_<ts>.json",
+  "notes": "optional",
+  "extra": { }
+}
+```
+
+### Conventions
+
+- **RNG seed.** Each gate run carries a single integer seed, captured
+  verbatim in `runtime.seed`. Gate experiments fan it out to
+  `numpy.random.seed`, `torch.manual_seed`, `torch.cuda.manual_seed_all`,
+  and `random.seed`.
+- **Hardware profile.** `runtime.platform`, `runtime.cpu`, `runtime.ram_bytes`,
+  `runtime.accelerator` capture the host. CPU-only smoke runs without
+  torch are supported (the harness degrades to `device=cpu`).
+- **Image digest.** `runtime.image_digest` should be the Docker image
+  digest used for the run. Falls back to `$NEXUM_IMAGE_DIGEST` when not
+  passed explicitly.
+- **Env vars.** Only an allowlist of harness-relevant keys
+  (`CUDA_VISIBLE_DEVICES`, `PYTHONHASHSEED`, `NEXUM_GATE`,
+  `NEXUM_RUN_ID`, `NEXUM_IMAGE_DIGEST`) is captured into
+  `runtime.env`. This avoids leaking secrets via result JSON.
+- **Filenames.** `<gate>_<UTC-timestamp>.json` where the timestamp slug is
+  `YYYYMMDDTHHMMSSZ`. Append-only — old files are not rewritten.
+- **Schema version.** Top-level `schema_version` is `1`. Bump on
+  breaking changes to the envelope and document the migration in
+  `docs/research/queue.md`.
+
+### CI smoke test
+
+`experiments/_lib/tests/test_harness.py` runs a 100-block toy corpus
+end-to-end through the harness (`capture_run_context` → `ResultEnvelope`
+→ `write_result` → JSON round-trip) and asserts the existing
+`experiments/g4-onnx-lossless/results/g4_result.json` legacy artifact
+remains parseable. Run with:
+
+```
+python3 -m pytest experiments/_lib/tests/ -q
+```
+
+This test runs in the `experiments-harness` GitHub Actions job on every
+push.
