@@ -427,3 +427,93 @@ class TestHighIngestContention:
 
         result = _format_result_h5_5(sync, deferred)
         assert result["h5_5_supported"] is True
+
+
+# ===========================================================================
+# H5.1 — Results writer integration (canonical envelope)
+# ===========================================================================
+
+class TestH5_1ResultsWriter:
+    """Verify that H5.1 results can be written through ResultEnvelope."""
+
+    def test_h5_1_results_writer_integration(self, monkeypatch, tmp_path):
+        """H5.1 result written via ResultEnvelope has required canonical keys."""
+        import sys
+        import os
+
+        # Add repo root to sys.path so experiments._lib is importable
+        area5_dir = os.path.dirname(os.path.dirname(__file__))
+        repo_root = os.path.abspath(os.path.join(area5_dir, "..", ".."))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+
+        from experiments._lib.results_writer import ResultEnvelope, write_result
+        from experiments._lib.runner import capture_run_context
+        from insertion_latency import measure_insertion_latency
+        import requests as req_module
+
+        def fake_get(*args, **kwargs):
+            raise ConnectionRefusedError("mock: server not running")
+
+        monkeypatch.setattr(req_module, "get", fake_get)
+
+        h5_1_result = measure_insertion_latency(
+            nexum_url="http://localhost:9999",
+            n_single_blocks=20,
+            n_batch_blocks=100,
+            seed=7,
+        )
+
+        run_ctx = capture_run_context(gate="H5.1", hypothesis="H5.1", seed=7)
+        envelope = ResultEnvelope(
+            gate="H5.1",
+            hypothesis="H5.1",
+            passed=h5_1_result["h5_1_supported"],
+            metrics=h5_1_result,
+            runtime=run_ctx,
+            notes="Test run — mock data only.",
+        )
+
+        out_path = write_result(envelope, area_dir=tmp_path, filename="h5.1_test.json")
+        assert out_path.exists()
+
+        import json
+        data = json.loads(out_path.read_text())
+
+        # Canonical envelope shape
+        assert data["schema_version"] == 1
+        assert data["gate"] == "H5.1"
+        assert data["hypothesis"] == "H5.1"
+        assert isinstance(data["pass"], bool)
+        assert "metrics" in data
+        assert "runtime" in data
+        assert "results_path" in data
+
+        # H5.1-specific metrics
+        metrics = data["metrics"]
+        assert "single_block" in metrics
+        assert "batch_1k" in metrics
+        assert "bottleneck_stage" in metrics
+        assert "h5_1_supported" in metrics
+        assert metrics["bottleneck_stage"] != "total_ms"
+
+    def test_h5_1_non_hnsw_bottleneck_noted(self, monkeypatch):
+        """When HNSW is not the bottleneck, bottleneck_stage is documented correctly."""
+        from insertion_latency import _format_result, PIPELINE_STAGES
+
+        # Artificially make embed_ms the largest stage
+        non_total = [s for s in PIPELINE_STAGES if s != "total_ms"]
+        single_stages = {}
+        for i, stage in enumerate(non_total):
+            # embed_ms (index 1) gets highest P99
+            p99 = 300.0 if stage == "embed_ms" else 50.0
+            single_stages[stage] = {"p50_ms": p99 * 0.6, "p99_ms": p99}
+        single_stages["total_ms"] = {"p50_ms": 280.0, "p99_ms": 450.0}
+
+        result = _format_result(
+            single_stages=single_stages,
+            batch_stages=single_stages,
+        )
+        # HNSW is NOT the bottleneck — embed is
+        assert result["bottleneck_stage"] == "embed_ms"
+        assert result["bottleneck_stage"] != "index_insert_ms"
