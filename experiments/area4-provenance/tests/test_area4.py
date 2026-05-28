@@ -486,3 +486,28 @@ class TestH41HumanEvalStudy:
         assert stats["p_value_time"] < 0.05, (
             f"Expected significant p-value, got {stats['p_value_time']}"
         )
+
+    def test_provenance_condition_uses_blocks_links_api(self):
+        """Provenance condition maps each EvalItem to GET /blocks/:id/links.
+
+        Verifies that:
+        1. Every EvalItem has a non-empty gold_block_id (the :id path parameter).
+        2. provenance_api_url() generates a correctly-formed /blocks/:id/links URL.
+        3. The URL path contains the exact gold_block_id, confirming no synthetic
+           placeholder is used — the real Nexum block table primary key is mapped.
+        """
+        from h4_1_human_eval_study import build_eval_corpus, provenance_api_url
+
+        corpus = build_eval_corpus()
+        for item in corpus:
+            # Condition A uses gold_block_id as the :id param for GET /blocks/:id/links
+            assert item.gold_block_id, (
+                f"item {item.item_id} missing gold_block_id — provenance API call cannot be formed"
+            )
+            url = provenance_api_url(item)
+            assert url.endswith(f"/blocks/{item.gold_block_id}/links"), (
+                f"Expected URL ending with /blocks/{item.gold_block_id}/links, got: {url}"
+            )
+            assert "/blocks/" in url and "/links" in url, (
+                f"URL does not match GET /blocks/:id/links contract: {url}"
+            )

@@ -512,6 +512,29 @@ def run_human_eval_study(
 
 
 # ---------------------------------------------------------------------------
+# API route helpers (for provenance condition instrumentation)
+# ---------------------------------------------------------------------------
+
+def provenance_api_url(item: EvalItem, base_url: str = "http://localhost:3000") -> str:
+    """Return the GET /blocks/:id/links URL for the provenance condition.
+
+    In a live study, reviewers navigate to this URL to inspect the block link
+    chain.  The ``gold_block_id`` field on each ``EvalItem`` is the ``:id``
+    path parameter — it maps 1:1 to the Nexum block table primary key.
+
+    Parameters
+    ----------
+    item: the EvalItem whose provenance chain should be inspected.
+    base_url: the Nexum instance root (defaults to localhost for local runs).
+
+    Returns
+    -------
+    Full URL string, e.g. ``http://localhost:3000/blocks/blk_lc01_p3_term/links``
+    """
+    return f"{base_url}/blocks/{item.gold_block_id}/links"
+
+
+# ---------------------------------------------------------------------------
 # Statistical analysis
 # ---------------------------------------------------------------------------
 
