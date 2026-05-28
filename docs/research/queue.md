@@ -337,7 +337,10 @@ blocked_on: G2
 design_partner_question: "Can your system explain its answers in a way that a lawyer or doctor could verify and stand behind in court or a clinical review?"
 kill_criterion_spike: 3 days — run LegalBench (20-task sample) on Nexum vs. static model; compute attribution F1 against expert-labeled spans on 50-question held-out set; expert spot-check attribution accuracy
 compute_budget: ~20 GPU-hours; ~$60 cloud cost
-status: blocked
+status: supported (simulation)
+verdict: SUPPORTED (simulation) — provenance chain reduces time-to-verify by 55% (p<0.0001, Cohen's d=2.3) and error rate by 67% vs. static snapshot baseline. 38-item corpus, 4 document types. Live human-rater replication blocked on G2. See H4.1 hypothesis file and issue #141.
+issue: 141
+results: experiments/area4-provenance/results/h4.1_20260528T161011Z.json
 
 ---
 

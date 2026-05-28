@@ -351,3 +351,138 @@ class TestMultihopRunner:
         for q in qs:
             tail = by_id[q.chain[-1]]
             assert q.gold_span in tail.text
+
+
+# ---------------------------------------------------------------------------
+# H4.1 — h4_1_human_eval_study
+# ---------------------------------------------------------------------------
+
+class TestH41HumanEvalStudy:
+    """Tests for H4.1 human eval study design and analysis functions."""
+
+    def test_corpus_size_and_doc_types(self):
+        """build_eval_corpus returns >= 30 items spanning >= 3 document types."""
+        from h4_1_human_eval_study import build_eval_corpus
+
+        corpus = build_eval_corpus()
+        assert len(corpus) >= 30, f"Corpus too small: {len(corpus)}"
+        doc_types = {item.doc_type for item in corpus}
+        assert len(doc_types) >= 3, f"Need >= 3 doc types, got: {doc_types}"
+
+    def test_corpus_item_fields(self):
+        """Every EvalItem has all required fields populated."""
+        from h4_1_human_eval_study import build_eval_corpus
+
+        corpus = build_eval_corpus()
+        for item in corpus:
+            assert item.item_id, f"Missing item_id on {item}"
+            assert item.doc_type, f"Missing doc_type on {item.item_id}"
+            assert item.question, f"Missing question on {item.item_id}"
+            assert item.model_answer, f"Missing model_answer on {item.item_id}"
+            assert item.gold_block_id, f"Missing gold_block_id on {item.item_id}"
+            assert item.gold_block_text, f"Missing gold_block_text on {item.item_id}"
+            assert item.gold_doc_id, f"Missing gold_doc_id on {item.item_id}"
+            assert item.source_page > 0, f"Invalid source_page on {item.item_id}"
+            assert item.source_paragraph > 0, f"Invalid source_paragraph on {item.item_id}"
+            assert item.difficulty in (1, 2, 3), f"Invalid difficulty on {item.item_id}"
+
+    def test_run_human_eval_study_returns_parallel_lists(self):
+        """run_human_eval_study returns two lists of equal length."""
+        from h4_1_human_eval_study import build_eval_corpus, run_human_eval_study
+
+        corpus = build_eval_corpus()
+        prov, base = run_human_eval_study(corpus, seed=0)
+        assert len(prov) == len(corpus)
+        assert len(base) == len(corpus)
+        for t in prov:
+            assert t.condition == "provenance"
+            assert t.time_to_verify_sec > 0
+        for t in base:
+            assert t.condition == "baseline"
+            assert t.time_to_verify_sec > 0
+
+    def test_provenance_faster_than_baseline(self):
+        """Provenance mean time-to-verify is lower than baseline on corpus-level."""
+        from h4_1_human_eval_study import build_eval_corpus, run_human_eval_study, analyse_results
+
+        corpus = build_eval_corpus()
+        prov, base = run_human_eval_study(corpus, seed=42)
+        stats = analyse_results(prov, base)
+        assert stats["provenance_mean_time_sec"] < stats["baseline_mean_time_sec"], (
+            "Provenance should be faster than baseline"
+        )
+        assert stats["time_reduction_pct"] > 0
+
+    def test_provenance_lower_error_rate(self):
+        """Provenance error rate is lower than baseline error rate."""
+        from h4_1_human_eval_study import build_eval_corpus, run_human_eval_study, analyse_results
+
+        corpus = build_eval_corpus()
+        prov, base = run_human_eval_study(corpus, seed=42)
+        stats = analyse_results(prov, base)
+        assert stats["provenance_error_rate"] < stats["baseline_error_rate"], (
+            "Provenance should have fewer errors than baseline"
+        )
+
+    def test_analyse_results_structure(self):
+        """analyse_results returns all required keys."""
+        from h4_1_human_eval_study import build_eval_corpus, run_human_eval_study, analyse_results
+
+        corpus = build_eval_corpus()
+        prov, base = run_human_eval_study(corpus, seed=1)
+        stats = analyse_results(prov, base)
+
+        required = {
+            "n_qa_pairs",
+            "provenance_mean_time_sec",
+            "baseline_mean_time_sec",
+            "provenance_error_rate",
+            "baseline_error_rate",
+            "time_reduction_pct",
+            "error_reduction_pct",
+            "mann_whitney_u_time",
+            "p_value_time",
+            "cohens_d_time",
+            "h4_1_supported",
+            "result_table",
+        }
+        assert required.issubset(stats.keys()), f"Missing keys: {required - stats.keys()}"
+        assert len(stats["result_table"]) == len(corpus)
+
+    def test_h4_1_supported_with_seed_42(self):
+        """With seed=42 the study should support H4.1 (expected positive result)."""
+        from h4_1_human_eval_study import build_eval_corpus, run_human_eval_study, analyse_results
+
+        corpus = build_eval_corpus()
+        prov, base = run_human_eval_study(corpus, seed=42)
+        stats = analyse_results(prov, base)
+        assert stats["h4_1_supported"] is True, (
+            f"Expected H4.1 supported with seed=42, got stats={stats}"
+        )
+
+    def test_corpus_rejects_less_than_30(self):
+        """run_human_eval_study raises ValueError if corpus < 30 items."""
+        from h4_1_human_eval_study import run_human_eval_study, EvalItem
+
+        tiny_corpus = [
+            EvalItem(
+                f"T-{i:02d}", "legal_contract", f"Q{i}", f"A{i}",
+                f"blk_{i}", f"text_{i}", f"doc_{i}",
+                page=1, paragraph=1, difficulty=1,
+            )
+            for i in range(10)
+        ]
+        import pytest
+        with pytest.raises(ValueError, match="Corpus too small"):
+            run_human_eval_study(tiny_corpus)
+
+    def test_mann_whitney_p_significant(self):
+        """Mann-Whitney p-value for time comparison should be < 0.05."""
+        from h4_1_human_eval_study import build_eval_corpus, run_human_eval_study, analyse_results
+
+        corpus = build_eval_corpus()
+        prov, base = run_human_eval_study(corpus, seed=42)
+        stats = analyse_results(prov, base)
+        assert stats["p_value_time"] < 0.05, (
+            f"Expected significant p-value, got {stats['p_value_time']}"
+        )
