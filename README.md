@@ -1,3 +1,10 @@
+> [!WARNING]
+> **Prototype — superseded by the Rust reimplementation.**
+>
+> `nexum-ts` is the original TypeScript prototype of Nexum. Its capabilities have been
+> ported to Rust (the `nexum` crate in the Superfield monorepo), which is now the source
+> of truth. This repository is retained for reference only and is no longer maintained.
+
 # Nexum
 
 Block-level document intelligence. Ingests documents (PDF, DOCX, Markdown), parses them into addressable blocks (sentences, paragraphs), and builds a typed cross-link graph across any corpus — legal, medical, research, or business.
